@@ -1,0 +1,31 @@
+# Core ML and RL libraries
+stable-baselines3>=2.0.0
+gymnasium>=0.29.0
+torch>=1.13.0
+numpy>=1.21.0
+pandas>=1.5.0
+scikit-learn>=1.2.0
+
+# Trading and Technical Analysis
+# tensortrade>=1.0.3  # Temporarily disabled - can cause dependency conflicts
+# ta-lib>=0.4.25     # Requires manual C++ compilation, using pandas-ta instead
+pandas-ta>=0.3.14b0
+ccxt>=3.0.0
+python-binance>=1.0.17
+
+# Data handling and visualization
+matplotlib>=3.5.0
+seaborn>=0.11.0
+plotly>=5.10.0
+tqdm>=4.60.0
+# yfinance>=0.2.18  # Temporarily disabled - causing installation issues
+
+# Utilities and progress tracking
+rich>=13.5.0
+click>=8.1.0
+python-dotenv>=1.0.0
+joblib>=1.3.0
+
+# Jupyter notebook support (optional)
+jupyter>=1.0.0
+ipykernel>=6.25.0

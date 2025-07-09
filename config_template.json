@@ -1,0 +1,82 @@
+{
+  "model_config": {
+    "architecture": "cnn_lstm",
+    "features_dim": 256,
+    "window_size": 60
+  },
+  "training_config": {
+    "algorithm": "ppo",
+    "total_timesteps": 1000000,
+    "learning_rate": 0.0003,
+    "batch_size": 64,
+    "n_steps": 2048,
+    "n_envs": 4,
+    "gamma": 0.99,
+    "gae_lambda": 0.95,
+    "clip_range": 0.2,
+    "ent_coef": 0.0,
+    "vf_coef": 0.5,
+    "max_grad_norm": 0.5
+  },
+  "environment_config": {
+    "initial_equity": 10000.0,
+    "max_leverage": 25.0,
+    "maker_fee": 0.0002,
+    "taker_fee": 0.0004,
+    "funding_rate": 0.0001,
+    "stop_loss_pct": 0.02,
+    "take_profit_pct": 0.04
+  },
+  "risk_management": {
+    "position_size_method": "kelly",
+    "max_position_pct": 0.1,
+    "daily_loss_limit": 0.05,
+    "max_trades_per_day": 10,
+    "risk_per_trade": 0.02
+  },
+  "data_config": {
+    "required_columns": ["open", "high", "low", "close", "volume", "timestamp"],
+    "validation_rules": {
+      "min_data_points": 1000,
+      "max_gap_minutes": 60,
+      "price_change_threshold": 0.5
+    }
+  },
+  "live_trading": {
+    "testnet": true,
+    "symbol": "BTCUSDT",
+    "check_interval_seconds": 10,
+    "max_position_size_usdt": 1000.0,
+    "enable_stop_loss": true,
+    "enable_take_profit": true,
+    "enable_funding_optimization": true
+  },
+  "logging": {
+    "log_level": "INFO",
+    "save_trade_logs": true,
+    "save_training_logs": true,
+    "tensorboard_logging": true,
+    "rich_progress_bars": true
+  },
+  "technical_indicators": {
+    "sma_periods": [10, 20, 50],
+    "ema_periods": [10, 20],
+    "rsi_period": 14,
+    "stoch_period": 14,
+    "bb_period": 20,
+    "bb_std": 2.0,
+    "atr_period": 14,
+    "macd_fast": 12,
+    "macd_slow": 26,
+    "macd_signal": 9
+  },
+  "multi_episode": {
+    "max_episodes": 10,
+    "validation_split": 0.2,
+    "min_train_size": 10000,
+    "continue_from_best": true,
+    "save_all_episodes": false,
+    "early_stopping_patience": 3,
+    "performance_threshold": 0.1
+  }
+}
