@@ -140,11 +140,15 @@ config.json
 api_keys.txt
 
 # Trading data and logs
+data/**/*.csv
+data/**/*.parquet
+data/**/*.feather
 data/*.csv
 data/*.parquet
 data/*.feather
 data/historical/
 data/live/
+data/coinapi/
 
 # Model files and training artifacts
 models/*.pth
