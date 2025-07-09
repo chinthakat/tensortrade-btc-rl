@@ -18,6 +18,9 @@ from collections import deque
 import warnings
 warnings.filterwarnings("ignore")
 
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
 class TradingMetrics:
     """Calculate trading performance metrics"""
     
@@ -162,7 +165,7 @@ class FuturesTradingEnv(gym.Env):
             dtype=np.float32
         )
         
-        # Define observation space
+        # Define observation space with enhanced portfolio features
         n_features = self.feature_columns.shape[1]
         self.observation_space = spaces.Dict({
             'market_features': spaces.Box(
@@ -172,12 +175,20 @@ class FuturesTradingEnv(gym.Env):
                 dtype=np.float32
             ),
             'portfolio_features': spaces.Box(
-                low=0, 
+                low=-np.inf, 
                 high=np.inf, 
-                shape=(5,),  # equity, position, unrealized_pnl, margin_used, drawdown
+                shape=(12,),  # Enhanced portfolio state
                 dtype=np.float32
             )
         })
+        
+        # Enhanced risk management parameters
+        self.consecutive_losses = 0
+        self.consecutive_loss_threshold = 5  # Trigger enhanced penalties after 5 consecutive losses
+        self.severe_loss_threshold = 0.05  # 5% of initial equity - terminate training
+        self.moderate_loss_threshold = 0.30  # 30% of initial equity - increase penalties
+        self.balance_history = deque(maxlen=20)  # Track balance trend
+        self.loss_penalty_multiplier = 1.0  # Dynamic penalty multiplier
     
     def _prepare_features(self):
         """Prepare technical indicators and features using TensorTrade-style processing"""
@@ -313,6 +324,19 @@ class FuturesTradingEnv(gym.Env):
         self.max_equity = self.initial_equity
         self.liquidated = False
         
+        # Enhanced balance and risk tracking
+        self.balance_history = deque(maxlen=20)
+        self.consecutive_losses = 0
+        self.consecutive_wins = 0
+        self.loss_penalty_multiplier = 1.0
+        self.last_trade_pnl = 0.0
+        self.total_realized_pnl = 0.0
+        self.balance_trend_slope = 0.0  # Track if balance is declining
+        
+        # Risk management flags
+        self.severe_drawdown_triggered = False
+        self.moderate_drawdown_triggered = False
+        
         # Episode tracking
         self.episode_trades = 0
         self.episode_profit = 0.0
@@ -359,17 +383,42 @@ class FuturesTradingEnv(gym.Env):
         
         # Update tracking
         self.equity_history.append(self.equity)
+        self.balance_history.append(self.balance)
+        
         if len(self.equity_history) > 1:
             equity_return = (self.equity - self.equity_history[-2]) / self.equity_history[-2]
             self.returns_history.append(equity_return)
         
+        # Calculate balance trend
+        if len(self.balance_history) >= 5:
+            # Simple linear regression slope to detect declining balance
+            x = np.arange(len(self.balance_history))
+            y = np.array(self.balance_history)
+            slope = np.polyfit(x, y, 1)[0]
+            self.balance_trend_slope = slope / self.initial_equity  # Normalized slope
+        
         self.max_equity = max(self.max_equity, self.equity)
         
-        # Calculate reward
-        reward = self._calculate_reward(prev_equity)
+        # Check for critical loss thresholds
+        equity_ratio = self.equity / self.initial_equity
+        terminated_early = False
+        
+        if equity_ratio <= self.severe_loss_threshold:
+            # Terminate training if balance drops below 5%
+            terminated_early = True
+            self.severe_drawdown_triggered = True
+            logging.warning(f"SEVERE LOSS: Equity dropped to {equity_ratio:.1%} of initial. Terminating training.")
+        elif equity_ratio <= self.moderate_loss_threshold and not self.moderate_drawdown_triggered:
+            # Trigger enhanced penalties if balance drops below 30%
+            self.moderate_drawdown_triggered = True
+            self.loss_penalty_multiplier = 2.0
+            logging.warning(f"MODERATE LOSS: Equity dropped to {equity_ratio:.1%} of initial. Increasing penalties.")
+        
+        # Calculate reward with enhanced risk management
+        reward = self._calculate_enhanced_reward(prev_equity)
         
         # Check terminal conditions
-        terminated = self.equity <= 0 or self.liquidated
+        terminated = self.equity <= 0 or self.liquidated or terminated_early
         truncated = self.current_step >= len(self.price_data) - 1
         
         # Move to next step
@@ -454,6 +503,20 @@ class FuturesTradingEnv(gym.Env):
         # Update balance
         self.balance += pnl - exit_fee
         self.total_fees += exit_fee
+        self.total_realized_pnl += pnl
+        self.last_trade_pnl = pnl
+        
+        # Update consecutive loss/win tracking
+        if pnl > 0:
+            self.consecutive_wins += 1
+            self.consecutive_losses = 0
+        else:
+            self.consecutive_losses += 1
+            self.consecutive_wins = 0
+            
+            # Increase penalty multiplier for consecutive losses
+            if self.consecutive_losses >= self.consecutive_loss_threshold:
+                self.loss_penalty_multiplier = min(3.0, 1.0 + (self.consecutive_losses - self.consecutive_loss_threshold) * 0.2)
         
         # Calculate funding costs (simplified)
         if self.trade_start_step:
@@ -565,44 +628,142 @@ class FuturesTradingEnv(gym.Env):
         
         return False
     
-    def _calculate_reward(self, prev_equity: float) -> float:
-        """Calculate reward using composite risk-adjusted approach"""
-        # Base profit/loss component
+    def _calculate_enhanced_reward(self, prev_equity: float) -> float:
+        """
+        Calculate reward with enhanced risk management and capped segments
+        """
+        # === BASE PROFIT/LOSS COMPONENT ===
         if prev_equity > 0:
             equity_change = (self.equity - prev_equity) / prev_equity
         else:
             equity_change = 0.0
         
-        reward = equity_change * 100  # Scale for better learning
+        # Scale and cap base reward
+        base_reward = equity_change * 100
+        base_reward = np.clip(base_reward, -10.0, 10.0)  # Cap base reward
         
-        # Risk penalty based on drawdown
+        # === RISK-ADJUSTED COMPONENTS ===
+        risk_penalty = 0.0
+        balance_penalty = 0.0
+        trend_penalty = 0.0
+        
+        # 1. Drawdown penalties (progressive)
         if len(self.equity_history) > 1:
             drawdown = (self.max_equity - self.equity) / self.max_equity
-            reward -= drawdown * 50  # Penalize drawdowns
+            
+            if drawdown > 0.5:  # >50% drawdown
+                risk_penalty += 20.0
+            elif drawdown > 0.3:  # >30% drawdown
+                risk_penalty += 10.0
+            elif drawdown > 0.1:  # >10% drawdown
+                risk_penalty += 5.0
+            else:
+                risk_penalty += drawdown * 25  # Linear penalty for smaller drawdowns
         
-        # Volatility penalty
+        # 2. Balance decline penalties (progressive)
+        equity_ratio = self.equity / self.initial_equity
+        
+        if equity_ratio <= 0.05:  # ≤5% remaining - SEVERE
+            balance_penalty = 50.0
+        elif equity_ratio <= 0.10:  # ≤10% remaining - CRITICAL
+            balance_penalty = 30.0
+        elif equity_ratio <= 0.20:  # ≤20% remaining - MAJOR
+            balance_penalty = 20.0
+        elif equity_ratio <= 0.30:  # ≤30% remaining - MODERATE
+            balance_penalty = 10.0
+        elif equity_ratio <= 0.50:  # ≤50% remaining - MINOR
+            balance_penalty = 5.0
+        
+        # 3. Consecutive loss penalties
+        consecutive_loss_penalty = 0.0
+        if self.consecutive_losses > 0:
+            # Exponential penalty for consecutive losses
+            consecutive_loss_penalty = min(15.0, self.consecutive_losses ** 1.5)
+        
+        # 4. Balance trend penalty (declining balance over time)
+        if self.balance_trend_slope < 0:  # Declining balance
+            trend_penalty = abs(self.balance_trend_slope) * 1000  # Scale the slope
+            trend_penalty = min(trend_penalty, 8.0)  # Cap trend penalty
+        
+        # 5. Volatility penalty
+        volatility_penalty = 0.0
         if len(self.returns_history) > 10:
             volatility = np.std(list(self.returns_history))
-            reward -= volatility * 20
+            volatility_penalty = min(volatility * 15, 5.0)  # Cap volatility penalty
         
-        # Cost penalty
-        if hasattr(self, '_last_fees'):
-            reward -= self._last_fees * 1000  # Penalize trading costs
+        # 6. Trading cost penalty
+        cost_penalty = 0.0
+        if hasattr(self, '_last_fees') and self._last_fees > 0:
+            cost_penalty = min(self._last_fees * 500, 2.0)  # Cap cost penalty
+        
+        # 7. Special penalties
+        special_penalty = 0.0
         
         # Liquidation penalty
         if self.liquidated:
-            reward -= 100
+            special_penalty += 25.0
+        
+        # Excessive leverage penalty
+        if self.leverage > 20:
+            special_penalty += (self.leverage - 20) * 0.5
+        
+        # === POSITIVE REWARDS ===
+        positive_bonus = 0.0
         
         # Position holding bonus (encourage longer-term thinking)
         if self.position_size != 0 and self.trade_start_step:
             hold_duration = self.current_step - self.trade_start_step
-            if hold_duration > 4:  # More than 1 hour
-                reward += 0.1
+            if 4 <= hold_duration <= 24:  # 1-6 hours optimal
+                positive_bonus += 0.5
+            elif hold_duration > 24:  # Penalize too long holds
+                positive_bonus -= 0.3
         
-        return float(reward)
+        # Consecutive wins bonus
+        if self.consecutive_wins > 0:
+            positive_bonus += min(self.consecutive_wins * 0.2, 2.0)  # Cap wins bonus
+        
+        # Recovery bonus (recovering from drawdown)
+        if len(self.equity_history) > 5:
+            recent_improvement = (self.equity - min(list(self.equity_history)[-5:])) / self.initial_equity
+            if recent_improvement > 0.05:  # 5% improvement
+                positive_bonus += min(recent_improvement * 20, 3.0)
+        
+        # === COMBINE ALL COMPONENTS ===
+        total_penalty = (
+            risk_penalty + 
+            balance_penalty + 
+            consecutive_loss_penalty + 
+            trend_penalty + 
+            volatility_penalty + 
+            cost_penalty + 
+            special_penalty
+        )
+        
+        # Apply dynamic loss multiplier
+        total_penalty *= self.loss_penalty_multiplier
+        
+        # Final reward calculation
+        final_reward = base_reward + positive_bonus - total_penalty
+        
+        # === SEGMENT-BASED CAPPING ===
+        # Cap final reward in different segments for stable learning
+        if final_reward > 0:
+            final_reward = min(final_reward, 15.0)  # Cap positive rewards
+        else:
+            final_reward = max(final_reward, -25.0)  # Cap negative rewards
+        
+        # Additional severe loss capping
+        if equity_ratio <= 0.10:  # Very low equity
+            final_reward = max(final_reward, -50.0)  # Allow larger negative rewards for severe losses
+        
+        return float(final_reward)
+    
+    def _calculate_reward(self, prev_equity: float) -> float:
+        """Legacy reward function - kept for compatibility"""
+        return self._calculate_enhanced_reward(prev_equity)
     
     def _get_observation(self) -> Dict[str, np.ndarray]:
-        """Get current observation"""
+        """Get current observation with enhanced portfolio features"""
         # Market features (windowed historical data)
         start_idx = max(0, self.current_step - self.window_size)
         end_idx = self.current_step
@@ -614,16 +775,41 @@ class FuturesTradingEnv(gym.Env):
             padding = np.zeros((self.window_size - market_features.shape[0], market_features.shape[1]))
             market_features = np.vstack([padding, market_features])
         
-        # Portfolio features
+        # Enhanced Portfolio features (12 features total)
         drawdown = (self.max_equity - self.equity) / self.max_equity if self.max_equity > 0 else 0
+        equity_ratio = self.equity / self.initial_equity if self.initial_equity > 0 else 0
+        balance_ratio = self.balance / self.initial_equity if self.initial_equity > 0 else 0
+        
+        # Calculate recent balance trend
+        balance_trend = 0.0
+        if len(self.balance_history) >= 3:
+            recent_change = (self.balance_history[-1] - self.balance_history[-3]) / self.initial_equity
+            balance_trend = np.clip(recent_change, -1.0, 1.0)
         
         portfolio_features = np.array([
-            self.equity / self.initial_equity,  # Normalized equity
-            self.leverage / self.max_leverage,  # Normalized leverage
-            self.unrealized_pnl / self.initial_equity if self.initial_equity > 0 else 0,  # Normalized PnL
-            self.margin_used / self.initial_equity if self.initial_equity > 0 else 0,  # Normalized margin
-            drawdown  # Current drawdown
+            # Core metrics
+            equity_ratio,  # Current equity / initial equity
+            balance_ratio,  # Current balance / initial equity  
+            self.leverage / self.max_leverage if self.max_leverage > 0 else 0,  # Normalized leverage
+            
+            # PnL and position info
+            self.unrealized_pnl / self.initial_equity if self.initial_equity > 0 else 0,  # Normalized unrealized PnL
+            self.total_realized_pnl / self.initial_equity if self.initial_equity > 0 else 0,  # Normalized total realized PnL
+            self.margin_used / self.initial_equity if self.initial_equity > 0 else 0,  # Normalized margin used
+            
+            # Risk metrics  
+            drawdown,  # Current drawdown from peak
+            self.balance_trend_slope,  # Balance trend (normalized slope)
+            balance_trend,  # Recent balance change
+            
+            # Trading behavior metrics
+            min(self.consecutive_losses / 10.0, 1.0),  # Normalized consecutive losses (cap at 10)
+            min(self.consecutive_wins / 10.0, 1.0),   # Normalized consecutive wins (cap at 10)
+            min(self.loss_penalty_multiplier / 3.0, 1.0),  # Normalized penalty multiplier
         ], dtype=np.float32)
+        
+        # Ensure no NaN or inf values
+        portfolio_features = np.nan_to_num(portfolio_features, nan=0.0, posinf=1.0, neginf=-1.0)
         
         return {
             'market_features': market_features.astype(np.float32),
@@ -631,28 +817,115 @@ class FuturesTradingEnv(gym.Env):
         }
     
     def _get_info(self) -> Dict[str, Any]:
-        """Get environment info"""
+        """Get environment info with enhanced risk metrics"""
+        equity_ratio = self.equity / self.initial_equity if self.initial_equity > 0 else 0
+        
         return {
+            # Core trading info
             'equity': self.equity,
+            'balance': self.balance,
+            'equity_ratio': equity_ratio,
             'position_size': self.position_size,
             'position_side': self.position_side,
             'leverage': self.leverage,
             'unrealized_pnl': self.unrealized_pnl,
+            'total_realized_pnl': self.total_realized_pnl,
+            
+            # Risk management info
+            'consecutive_losses': self.consecutive_losses,
+            'consecutive_wins': self.consecutive_wins,
+            'loss_penalty_multiplier': self.loss_penalty_multiplier,
+            'balance_trend_slope': self.balance_trend_slope,
+            'severe_drawdown_triggered': self.severe_drawdown_triggered,
+            'moderate_drawdown_triggered': self.moderate_drawdown_triggered,
+            
+            # Episode info
             'episode_trades': self.episode_trades,
             'episode_profit': self.episode_profit,
             'liquidated': self.liquidated,
             'current_step': self.current_step,
-            'max_steps': len(self.price_data) - 1
+            'max_steps': len(self.price_data) - 1,
+            
+            # Performance metrics
+            'max_equity': self.max_equity,
+            'drawdown': (self.max_equity - self.equity) / self.max_equity if self.max_equity > 0 else 0,
+            'total_fees': self.total_fees,
+            'last_trade_pnl': self.last_trade_pnl
         }
     
     def render(self, mode='human'):
-        """Render environment state"""
+        """Render environment state with enhanced risk information"""
         if mode == 'human':
             current_price = self.price_data.iloc[self.current_step]['close']
+            equity_ratio = self.equity / self.initial_equity
+            drawdown = (self.max_equity - self.equity) / self.max_equity if self.max_equity > 0 else 0
+            
             print(f"Step: {self.current_step}")
             print(f"Price: {current_price:.2f}")
-            print(f"Equity: {self.equity:.2f}")
+            print(f"Equity: {self.equity:.2f} ({equity_ratio:.1%} of initial)")
+            print(f"Balance: {self.balance:.2f}")
             print(f"Position: {self.position_size:.4f}")
             print(f"Leverage: {self.leverage:.2f}x")
             print(f"Unrealized PnL: {self.unrealized_pnl:.2f}")
-            print("-" * 40)
+            print(f"Total Realized PnL: {self.total_realized_pnl:.2f}")
+            print(f"Drawdown: {drawdown:.1%}")
+            print(f"Consecutive Losses: {self.consecutive_losses}")
+            print(f"Loss Penalty Multiplier: {self.loss_penalty_multiplier:.2f}x")
+            print(f"Balance Trend: {self.balance_trend_slope:.6f}")
+            
+            # Risk warnings
+            if self.severe_drawdown_triggered:
+                print("⚠️  SEVERE DRAWDOWN - Training termination triggered!")
+            elif self.moderate_drawdown_triggered:
+                print("⚠️  MODERATE DRAWDOWN - Enhanced penalties active!")
+            elif equity_ratio <= 0.50:
+                print("⚠️  Significant losses detected!")
+            
+            print("-" * 50)
+    
+    def get_risk_management_summary(self) -> Dict[str, Any]:
+        """Get a summary of current risk management settings and status"""
+        equity_ratio = self.equity / self.initial_equity if self.initial_equity > 0 else 0
+        
+        return {
+            'risk_thresholds': {
+                'severe_loss_threshold': f"{self.severe_loss_threshold:.1%}",
+                'moderate_loss_threshold': f"{self.moderate_loss_threshold:.1%}",
+                'consecutive_loss_threshold': self.consecutive_loss_threshold
+            },
+            'current_status': {
+                'equity_ratio': f"{equity_ratio:.1%}",
+                'consecutive_losses': self.consecutive_losses,
+                'consecutive_wins': self.consecutive_wins,
+                'loss_penalty_multiplier': f"{self.loss_penalty_multiplier:.2f}x",
+                'balance_trend': 'Declining' if self.balance_trend_slope < 0 else 'Stable/Rising',
+                'severe_drawdown_triggered': self.severe_drawdown_triggered,
+                'moderate_drawdown_triggered': self.moderate_drawdown_triggered
+            },
+            'warnings': self._get_risk_warnings()
+        }
+    
+    def _get_risk_warnings(self) -> List[str]:
+        """Get current risk warnings"""
+        warnings = []
+        equity_ratio = self.equity / self.initial_equity if self.initial_equity > 0 else 0
+        
+        if self.severe_drawdown_triggered:
+            warnings.append("CRITICAL: Severe drawdown triggered - training will terminate")
+        elif equity_ratio <= 0.10:
+            warnings.append("WARNING: Equity below 10% of initial")
+        elif self.moderate_drawdown_triggered:
+            warnings.append("WARNING: Moderate drawdown triggered - enhanced penalties active")
+        elif equity_ratio <= 0.50:
+            warnings.append("CAUTION: Significant losses detected")
+        
+        if self.consecutive_losses >= self.consecutive_loss_threshold:
+            warnings.append(f"WARNING: {self.consecutive_losses} consecutive losses")
+        
+        if self.balance_trend_slope < -0.01:  # Significant declining trend
+            warnings.append("WARNING: Balance showing declining trend")
+        
+        if self.loss_penalty_multiplier > 2.0:
+            warnings.append("INFO: High penalty multiplier active")
+        
+        return warnings
