@@ -16,6 +16,11 @@ import csv
 import os
 from collections import deque
 import warnings
+try:
+    from sklearn.preprocessing import StandardScaler
+except ImportError:
+    StandardScaler = None
+    logging.warning("scikit-learn not available. Feature scaling will be skipped.")
 warnings.filterwarnings("ignore")
 
 # Configure logging
@@ -130,7 +135,9 @@ class FuturesTradingEnv(gym.Env):
         stop_loss_pct: float = 0.02,  # 2%
         take_profit_pct: float = 0.04,  # 4%
         log_file: str = None,
-        training_iteration: int = 0
+        training_iteration: int = 0,
+        training_split_ratio: float = 0.7,  # Use 70% of data for scaler fitting
+        training_end_idx: Optional[int] = None  # Explicit training end index for scaling
     ):
         super().__init__()
         
@@ -144,6 +151,8 @@ class FuturesTradingEnv(gym.Env):
         self.stop_loss_pct = stop_loss_pct
         self.take_profit_pct = take_profit_pct
         self.training_iteration = training_iteration
+        self.training_split_ratio = training_split_ratio
+        self.training_end_idx = training_end_idx
         
         # Initialize logger
         if log_file:
@@ -151,8 +160,8 @@ class FuturesTradingEnv(gym.Env):
         else:
             self.logger = None
         
-        # Prepare technical indicators
-        self._prepare_features()
+        # Prepare technical indicators with proper scaling
+        self._prepare_features(training_end_idx)
         
         # Trading state
         self.reset()
@@ -190,8 +199,14 @@ class FuturesTradingEnv(gym.Env):
         self.balance_history = deque(maxlen=20)  # Track balance trend
         self.loss_penalty_multiplier = 1.0  # Dynamic penalty multiplier
     
-    def _prepare_features(self):
-        """Prepare technical indicators and features using TensorTrade-style processing"""
+    def _prepare_features(self, training_end_idx: Optional[int] = None):
+        """
+        Prepare technical indicators and features using TensorTrade-style processing
+        
+        Args:
+            training_end_idx: Index to split training data for proper scaling.
+                            If None, uses the first 70% of data for fitting scaler.
+        """
         try:
             import pandas_ta as ta
             use_pandas_ta = True
@@ -283,14 +298,32 @@ class FuturesTradingEnv(gym.Env):
         self.feature_columns = df[feature_cols].copy()
         self.price_data = df[['open', 'high', 'low', 'close', 'volume', 'timestamp']].copy()
         
-        # Normalize features
-        from sklearn.preprocessing import StandardScaler
-        self.scaler = StandardScaler()
+        # FIX FOR DATA LEAKAGE: Proper feature scaling without lookahead bias
+        if StandardScaler is None:
+            logging.warning("StandardScaler not available. Using SimpleStandardScaler fallback.")
+            self.scaler = SimpleStandardScaler()
+        else:
+            self.scaler = StandardScaler()
+        
+        # Determine training split for scaler fitting
+        if training_end_idx is None:
+            # Use first 70% of data for fitting scaler (avoid lookahead bias)
+            training_end_idx = int(len(self.feature_columns) * 0.7)
+            logging.info(f"Using first {training_end_idx} samples ({training_end_idx/len(self.feature_columns):.1%}) for scaler fitting")
+        
+        # Fit scaler ONLY on training data (prevents data leakage)
+        training_features = self.feature_columns.iloc[:training_end_idx]
+        self.scaler.fit(training_features)
+        
+        # Transform ALL data using the fitted scaler (no refitting)
         self.feature_columns_scaled = pd.DataFrame(
-            self.scaler.fit_transform(self.feature_columns),
+            self.scaler.transform(self.feature_columns),
             columns=self.feature_columns.columns,
             index=self.feature_columns.index
         )
+        
+        logging.info(f"Feature scaling completed - fitted on {len(training_features)} training samples, "
+                    f"applied to {len(self.feature_columns)} total samples")
     
     def reset(self, seed=None, options=None):
         """Reset environment to initial state"""
@@ -929,3 +962,247 @@ class FuturesTradingEnv(gym.Env):
             warnings.append("INFO: High penalty multiplier active")
         
         return warnings
+    
+    def update_scaler_with_new_data(self, new_features: pd.DataFrame):
+        """
+        Update feature scaling for new incoming data (for live trading)
+        
+        This method applies the existing fitted scaler to new data without refitting,
+        maintaining consistency with the training data scaling.
+        
+        Args:
+            new_features: New feature data to be scaled
+            
+        Returns:
+            pd.DataFrame: Scaled new features
+        """
+        if not hasattr(self, 'scaler') or self.scaler is None:
+            raise ValueError("Scaler not initialized. Call _prepare_features first.")
+        
+        # Transform new data using existing scaler (NO refitting)
+        scaled_features = pd.DataFrame(
+            self.scaler.transform(new_features),
+            columns=new_features.columns,
+            index=new_features.index
+        )
+        
+        return scaled_features
+    
+    def get_scaler_params(self) -> Dict[str, Any]:
+        """
+        Get scaler parameters for debugging and validation
+        
+        Returns:
+            Dict containing scaler mean, scale, and training data info
+        """
+        if not hasattr(self, 'scaler') or self.scaler is None:
+            return {"error": "Scaler not initialized"}
+        
+        return {
+            "feature_means": dict(zip(self.feature_columns.columns, self.scaler.mean_)),
+            "feature_scales": dict(zip(self.feature_columns.columns, self.scaler.scale_)),
+            "n_features": self.scaler.n_features_in_,
+            "n_samples_seen": self.scaler.n_samples_seen_
+        }
+    
+    def validate_no_data_leakage(self, validation_start_idx: int) -> Dict[str, Any]:
+        """
+        Validate that scaling was done properly without data leakage
+        
+        Args:
+            validation_start_idx: Index where validation data starts
+            
+        Returns:
+            Dict with validation results
+        """
+        if not hasattr(self, 'scaler'):
+            return {"error": "Scaler not initialized"}
+        
+        # Check if scaler was fitted on training data only
+        training_samples = self.scaler.n_samples_seen_
+        validation_samples = len(self.feature_columns) - validation_start_idx
+        
+        results = {
+            "total_samples": len(self.feature_columns),
+            "training_samples_used_for_scaling": training_samples,
+            "validation_samples": validation_samples,
+            "scaler_fitted_on_training_only": training_samples <= validation_start_idx,
+            "data_leakage_detected": training_samples > validation_start_idx
+        }
+        
+        if results["data_leakage_detected"]:
+            results["warning"] = "POTENTIAL DATA LEAKAGE: Scaler was fitted on validation data"
+        else:
+            results["status"] = "OK: No data leakage detected in feature scaling"
+        
+        return results
+    
+    @classmethod
+    def create_train_val_environments(
+        cls,
+        df: pd.DataFrame,
+        train_ratio: float = 0.7,
+        val_ratio: float = 0.3,
+        **kwargs
+    ) -> Tuple['FuturesTradingEnv', 'FuturesTradingEnv']:
+        """
+        Create separate training and validation environments with proper data splitting
+        to prevent data leakage in feature scaling.
+        
+        Args:
+            df: Full dataset
+            train_ratio: Ratio of data to use for training (default 0.7)
+            val_ratio: Ratio of data to use for validation (default 0.3)
+            **kwargs: Additional arguments passed to environment constructor
+            
+        Returns:
+            Tuple of (train_env, val_env)
+        """
+        if train_ratio + val_ratio > 1.0:
+            raise ValueError("train_ratio + val_ratio cannot exceed 1.0")
+        
+        total_samples = len(df)
+        train_end_idx = int(total_samples * train_ratio)
+        val_start_idx = train_end_idx
+        val_end_idx = int(total_samples * (train_ratio + val_ratio))
+        
+        # Create training environment
+        train_df = df.iloc[:train_end_idx].copy()
+        train_env = cls(
+            df=train_df,
+            training_end_idx=len(train_df),  # Use all training data for scaler fitting
+            **kwargs
+        )
+        
+        # Create validation environment using the same scaler from training
+        val_df = df.iloc[val_start_idx:val_end_idx].copy()
+        val_env = cls(
+            df=val_df,
+            training_end_idx=train_end_idx,  # Use training data size for validation
+            **kwargs
+        )
+        
+        # Copy the fitted scaler from training to validation environment
+        if hasattr(train_env, 'scaler') and train_env.scaler is not None:
+            val_env.scaler = train_env.scaler
+            
+            # Re-transform validation features using the training scaler
+            val_env.feature_columns_scaled = pd.DataFrame(
+                val_env.scaler.transform(val_env.feature_columns),
+                columns=val_env.feature_columns.columns,
+                index=val_env.feature_columns.index
+            )
+        
+        logging.info(f"Created train/val environments:")
+        logging.info(f"  Training: {len(train_df)} samples (0 to {train_end_idx-1})")
+        logging.info(f"  Validation: {len(val_df)} samples ({val_start_idx} to {val_end_idx-1})")
+        logging.info(f"  Scaler fitted on training data only")
+        
+        return train_env, val_env
+    
+    @classmethod 
+    def create_walk_forward_environments(
+        cls,
+        df: pd.DataFrame,
+        train_window: int = 10000,  # Number of samples for training
+        val_window: int = 2000,    # Number of samples for validation
+        step_size: int = 1000,     # Step size for walk-forward
+        **kwargs
+    ) -> List[Tuple['FuturesTradingEnv', 'FuturesTradingEnv']]:
+        """
+        Create multiple train/validation environment pairs using walk-forward analysis
+        to prevent data leakage across time periods.
+        
+        Args:
+            df: Full dataset
+            train_window: Number of samples to use for training
+            val_window: Number of samples to use for validation  
+            step_size: Number of samples to step forward each iteration
+            **kwargs: Additional arguments passed to environment constructor
+            
+        Returns:
+            List of (train_env, val_env) tuples
+        """
+        environments = []
+        total_samples = len(df)
+        
+        start_idx = 0
+        while start_idx + train_window + val_window <= total_samples:
+            train_end_idx = start_idx + train_window
+            val_start_idx = train_end_idx
+            val_end_idx = val_start_idx + val_window
+            
+            # Create training environment
+            train_df = df.iloc[start_idx:train_end_idx].copy()
+            train_env = cls(
+                df=train_df,
+                training_end_idx=len(train_df),  # Use all training data for scaler
+                **kwargs
+            )
+            
+            # Create validation environment
+            val_df = df.iloc[val_start_idx:val_end_idx].copy()
+            val_env = cls(
+                df=val_df,
+                training_end_idx=train_window,  # Reference to training window size
+                **kwargs
+            )
+            
+            # Copy fitted scaler from training to validation
+            if hasattr(train_env, 'scaler') and train_env.scaler is not None:
+                val_env.scaler = train_env.scaler
+                val_env.feature_columns_scaled = pd.DataFrame(
+                    val_env.scaler.transform(val_env.feature_columns),
+                    columns=val_env.feature_columns.columns,
+                    index=val_env.feature_columns.index
+                )
+            
+            environments.append((train_env, val_env))
+            start_idx += step_size
+        
+        logging.info(f"Created {len(environments)} walk-forward environment pairs")
+        logging.info(f"  Train window: {train_window} samples")
+        logging.info(f"  Val window: {val_window} samples") 
+        logging.info(f"  Step size: {step_size} samples")
+        
+        return environments
+    
+
+class SimpleStandardScaler:
+    """
+    Simple fallback implementation of StandardScaler when scikit-learn is not available
+    """
+    def __init__(self):
+        self.mean_ = None
+        self.scale_ = None
+        self.n_features_in_ = None
+        self.n_samples_seen_ = None
+    
+    def fit(self, X):
+        """Fit scaler to training data"""
+        if isinstance(X, pd.DataFrame):
+            X = X.values
+        
+        self.mean_ = np.mean(X, axis=0)
+        self.scale_ = np.std(X, axis=0)
+        # Avoid division by zero
+        self.scale_[self.scale_ == 0] = 1.0
+        self.n_features_in_ = X.shape[1]
+        self.n_samples_seen_ = X.shape[0]
+        return self
+    
+    def transform(self, X):
+        """Transform data using fitted parameters"""
+        if self.mean_ is None or self.scale_ is None:
+            raise ValueError("Scaler has not been fitted yet")
+        
+        if isinstance(X, pd.DataFrame):
+            X_values = X.values
+        else:
+            X_values = X
+        
+        return (X_values - self.mean_) / self.scale_
+    
+    def fit_transform(self, X):
+        """Fit scaler and transform data"""
+        return self.fit(X).transform(X)
