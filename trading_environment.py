@@ -139,8 +139,16 @@ class FuturesTradingEnv(gym.Env):
         taker_fee: float = 0.0004,  # 0.04%
         funding_rate: float = 0.0001,  # 0.01% per 8 hours
         window_size: int = 60,
-        stop_loss_pct: float = 0.02,  # 2%
-        take_profit_pct: float = 0.04,  # 4%
+        stop_loss_pct: float = 0.02,  # 2% - fallback for fixed mode
+        take_profit_pct: float = 0.04,  # 4% - fallback for fixed mode
+        # Dynamic Stop-Loss and Take-Profit Configuration
+        use_dynamic_stops: bool = True,  # Enable ATR-based dynamic stops
+        atr_stop_loss_multiplier: float = 2.0,  # Stop-loss = ATR * multiplier
+        atr_take_profit_multiplier: float = 3.0,  # Take-profit = ATR * multiplier
+        min_stop_loss_pct: float = 0.005,  # 0.5% minimum stop-loss
+        max_stop_loss_pct: float = 0.08,  # 8% maximum stop-loss
+        min_take_profit_pct: float = 0.01,  # 1% minimum take-profit
+        max_take_profit_pct: float = 0.15,  # 15% maximum take-profit
         log_file: str = None,
         training_iteration: int = 0,
         training_split_ratio: float = 0.7,  # Use 70% of data for scaler fitting
@@ -164,6 +172,15 @@ class FuturesTradingEnv(gym.Env):
         self.window_size = window_size
         self.stop_loss_pct = stop_loss_pct
         self.take_profit_pct = take_profit_pct
+        
+        # Dynamic stop-loss and take-profit configuration
+        self.use_dynamic_stops = use_dynamic_stops
+        self.atr_stop_loss_multiplier = atr_stop_loss_multiplier
+        self.atr_take_profit_multiplier = atr_take_profit_multiplier
+        self.min_stop_loss_pct = min_stop_loss_pct
+        self.max_stop_loss_pct = max_stop_loss_pct
+        self.min_take_profit_pct = min_take_profit_pct
+        self.max_take_profit_pct = max_take_profit_pct
         self.training_iteration = training_iteration
         self.training_split_ratio = training_split_ratio
         self.training_end_idx = training_end_idx
@@ -424,16 +441,27 @@ class FuturesTradingEnv(gym.Env):
         # Parse action based on action space type
         if self.use_advanced_action_space:
             # Advanced action space: Dict with leverage and risk_percentage
-            leverage = action['leverage'][0] if isinstance(action['leverage'], np.ndarray) else action['leverage']
-            risk_percentage = action['risk_percentage'][0] if isinstance(action['risk_percentage'], np.ndarray) else action['risk_percentage']
+            if isinstance(action, dict):
+                leverage = action['leverage'][0] if isinstance(action['leverage'], np.ndarray) else action['leverage']
+                risk_percentage = action['risk_percentage'][0] if isinstance(action['risk_percentage'], np.ndarray) else action['risk_percentage']
+            else:
+                # If action is from wrapper, it's a numpy array [leverage, risk_percentage]
+                leverage = action[0]
+                risk_percentage = action[1]
             
             # Clip values to valid ranges
-            leverage = np.clip(leverage, -self.max_leverage, self.max_leverage)
-            risk_percentage = np.clip(risk_percentage, 0.01, 1.0)
+            leverage = float(np.clip(leverage, -self.max_leverage, self.max_leverage))
+            risk_percentage = float(np.clip(risk_percentage, 0.01, 1.0))
         else:
             # Legacy action space: single leverage value
-            leverage = action[0] if isinstance(action, np.ndarray) else action
-            leverage = np.clip(leverage, -self.max_leverage, self.max_leverage)
+            if isinstance(action, dict):
+                # This shouldn't happen in legacy mode, but handle gracefully
+                leverage = action.get('leverage', 0.0)
+                if isinstance(leverage, (list, np.ndarray)):
+                    leverage = leverage[0]
+            else:
+                leverage = action[0] if isinstance(action, (list, np.ndarray)) else action
+            leverage = float(np.clip(leverage, -self.max_leverage, self.max_leverage))
             risk_percentage = 1.0  # Use full equity (legacy behavior)
         
         # Store previous state
@@ -631,18 +659,111 @@ class FuturesTradingEnv(gym.Env):
             )
     
     def _update_stop_loss_take_profit(self, current_price: float):
-        """Update stop-loss and take-profit prices for current position"""
+        """Update stop-loss and take-profit prices with dynamic ATR-based calculation"""
         if abs(self.position_size) < 0.001:
             self.stop_loss_price = None
             self.take_profit_price = None
             return
         
-        if self.position_side == 1:  # Long
-            self.stop_loss_price = current_price * (1 - self.stop_loss_pct)
-            self.take_profit_price = current_price * (1 + self.take_profit_pct)
-        else:  # Short
-            self.stop_loss_price = current_price * (1 + self.stop_loss_pct)
-            self.take_profit_price = current_price * (1 - self.take_profit_pct)
+        if self.use_dynamic_stops:
+            # Get current ATR value for dynamic calculation
+            current_atr = self._get_current_atr(current_price)
+            
+            # Calculate dynamic stop-loss and take-profit percentages
+            dynamic_stop_pct, dynamic_tp_pct = self._calculate_dynamic_stops(current_atr, current_price)
+            
+            if self.position_side == 1:  # Long
+                self.stop_loss_price = current_price * (1 - dynamic_stop_pct)
+                self.take_profit_price = current_price * (1 + dynamic_tp_pct)
+            else:  # Short
+                self.stop_loss_price = current_price * (1 + dynamic_stop_pct)
+                self.take_profit_price = current_price * (1 - dynamic_tp_pct)
+        else:
+            # Fallback to fixed percentages
+            if self.position_side == 1:  # Long
+                self.stop_loss_price = current_price * (1 - self.stop_loss_pct)
+                self.take_profit_price = current_price * (1 + self.take_profit_pct)
+            else:  # Short
+                self.stop_loss_price = current_price * (1 + self.stop_loss_pct)
+                self.take_profit_price = current_price * (1 - self.take_profit_pct)
+    
+    def _get_current_atr(self, current_price: float) -> float:
+        """Get current ATR value from the feature data (before scaling)"""
+        try:
+            # ATR is in the original feature columns, not price_data
+            current_atr = self.feature_columns.iloc[self.current_step]['atr']
+            
+            # Handle NaN or invalid ATR values
+            if pd.isna(current_atr) or current_atr <= 0:
+                # Fallback: use recent ATR or calculate a simple estimate
+                recent_atr_values = self.feature_columns.iloc[max(0, self.current_step-10):self.current_step+1]['atr'].dropna()
+                if len(recent_atr_values) > 0:
+                    current_atr = recent_atr_values.iloc[-1]
+                else:
+                    # Final fallback: estimate ATR as 1% of current price
+                    current_atr = current_price * 0.01
+                    
+            return float(current_atr)
+        except (KeyError, IndexError):
+            # Fallback if ATR column doesn't exist or index error
+            return current_price * 0.01
+    
+    def _calculate_dynamic_stops(self, atr: float, current_price: float) -> tuple[float, float]:
+        """
+        Calculate dynamic stop-loss and take-profit percentages based on ATR
+        
+        Args:
+            atr: Current Average True Range value
+            current_price: Current market price
+            
+        Returns:
+            Tuple of (stop_loss_percentage, take_profit_percentage)
+        """
+        # Convert ATR to percentage of current price
+        atr_percentage = atr / current_price
+        
+        # Calculate dynamic stop-loss and take-profit
+        dynamic_stop_pct = atr_percentage * self.atr_stop_loss_multiplier
+        dynamic_tp_pct = atr_percentage * self.atr_take_profit_multiplier
+        
+        # Apply minimum and maximum bounds for risk management
+        dynamic_stop_pct = max(self.min_stop_loss_pct, 
+                              min(self.max_stop_loss_pct, dynamic_stop_pct))
+        
+        dynamic_tp_pct = max(self.min_take_profit_pct, 
+                            min(self.max_take_profit_pct, dynamic_tp_pct))
+        
+        return dynamic_stop_pct, dynamic_tp_pct
+    
+    def get_dynamic_stops_info(self) -> Dict[str, float]:
+        """Get information about current dynamic stop-loss and take-profit settings"""
+        if not self.use_dynamic_stops:
+            return {
+                'mode': 'fixed',
+                'stop_loss_pct': self.stop_loss_pct,
+                'take_profit_pct': self.take_profit_pct
+            }
+        
+        try:
+            current_price = self.price_data.iloc[self.current_step]['close']
+            current_atr = self._get_current_atr(current_price)
+            atr_percentage = current_atr / current_price
+            
+            dynamic_stop_pct, dynamic_tp_pct = self._calculate_dynamic_stops(current_atr, current_price)
+            
+            return {
+                'mode': 'dynamic',
+                'current_atr': current_atr,
+                'atr_percentage': atr_percentage,
+                'dynamic_stop_loss_pct': dynamic_stop_pct,
+                'dynamic_take_profit_pct': dynamic_tp_pct,
+                'atr_stop_multiplier': self.atr_stop_loss_multiplier,
+                'atr_tp_multiplier': self.atr_take_profit_multiplier,
+                'stop_loss_price': self.stop_loss_price,
+                'take_profit_price': self.take_profit_price
+            }
+        except Exception as e:
+            return {'mode': 'dynamic', 'error': str(e)}
     
     def _open_or_adjust_position(self, target_position_size: float, current_price: float):
         """
