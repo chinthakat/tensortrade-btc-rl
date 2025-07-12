@@ -544,6 +544,8 @@ def setup_multi_episode_training():
             "window_size": IntPrompt.ask("Window size", default=60),
             "stop_loss_pct": FloatPrompt.ask("Stop loss %", default=0.02),
             "take_profit_pct": FloatPrompt.ask("Take profit %", default=0.04),
+            "maintenance_margin_rate": FloatPrompt.ask("Maintenance margin rate (0.004 = 0.4%)", default=0.004),
+            "liquidation_fee_rate": FloatPrompt.ask("Liquidation fee rate (0.005 = 0.5%)", default=0.005),
             "n_envs": IntPrompt.ask("Parallel environments", default=4)
         }
     }

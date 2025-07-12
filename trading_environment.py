@@ -16,11 +16,18 @@ import csv
 import os
 from collections import deque
 import warnings
+
+# Required dependencies - fail fast if not available
 try:
     from sklearn.preprocessing import StandardScaler
 except ImportError:
-    StandardScaler = None
-    logging.warning("scikit-learn not available. Feature scaling will be skipped.")
+    raise ImportError("scikit-learn is required but not installed. Please install with: pip install scikit-learn")
+
+try:
+    import pandas_ta as ta
+except ImportError:
+    raise ImportError("pandas_ta is required but not installed. Please install with: pip install pandas_ta")
+
 warnings.filterwarnings("ignore")
 
 # Configure logging
@@ -137,7 +144,10 @@ class FuturesTradingEnv(gym.Env):
         log_file: str = None,
         training_iteration: int = 0,
         training_split_ratio: float = 0.7,  # Use 70% of data for scaler fitting
-        training_end_idx: Optional[int] = None  # Explicit training end index for scaling
+        training_end_idx: Optional[int] = None,  # Explicit training end index for scaling
+        # Liquidation parameters (based on Binance Futures)
+        maintenance_margin_rate: float = 0.004,  # 0.4% for most symbols at moderate leverage
+        liquidation_fee_rate: float = 0.005  # 0.5% liquidation fee
     ):
         super().__init__()
         
@@ -153,6 +163,10 @@ class FuturesTradingEnv(gym.Env):
         self.training_iteration = training_iteration
         self.training_split_ratio = training_split_ratio
         self.training_end_idx = training_end_idx
+        
+        # Liquidation parameters
+        self.maintenance_margin_rate = maintenance_margin_rate
+        self.liquidation_fee_rate = liquidation_fee_rate
         
         # Initialize logger
         if log_file:
@@ -201,19 +215,12 @@ class FuturesTradingEnv(gym.Env):
     
     def _prepare_features(self, training_end_idx: Optional[int] = None):
         """
-        Prepare technical indicators and features using TensorTrade-style processing
+        Prepare technical indicators and features using pandas_ta
         
         Args:
             training_end_idx: Index to split training data for proper scaling.
                             If None, uses the first 70% of data for fitting scaler.
         """
-        try:
-            import pandas_ta as ta
-            use_pandas_ta = True
-        except ImportError:
-            # Use fallback implementation
-            from fallback_ta import FallbackTA as ta
-            use_pandas_ta = False
         
         df = self.df.copy()
         
@@ -223,61 +230,55 @@ class FuturesTradingEnv(gym.Env):
         df['high_low_pct'] = (df['high'] - df['low']) / df['close']
         df['close_open_pct'] = (df['close'] - df['open']) / df['open']
         
-        # Technical indicators
-        if use_pandas_ta:
-            df['sma_10'] = ta.sma(df['close'], length=10)
-            df['sma_20'] = ta.sma(df['close'], length=20)
-            df['ema_10'] = ta.ema(df['close'], length=10)
-            df['ema_20'] = ta.ema(df['close'], length=20)
-            
-            # Momentum indicators
-            df['rsi'] = ta.rsi(df['close'], length=14)
-            stoch = ta.stoch(df['high'], df['low'], df['close'])
-            df['stoch_k'] = stoch['STOCHk_14_3_3'] if isinstance(stoch, pd.DataFrame) else stoch
-            
-            # Volatility indicators
-            bb = ta.bbands(df['close'], length=20)
-            df['bb_upper'] = bb['BBU_20_2.0']
-            df['bb_lower'] = bb['BBL_20_2.0']
-            df['bb_middle'] = bb['BBM_20_2.0']
-            df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / df['bb_middle']
-            df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
-            
-            # MACD
-            macd = ta.macd(df['close'])
-            df['macd'] = macd['MACD_12_26_9']
-            df['macd_signal'] = macd['MACDs_12_26_9']
-            df['macd_histogram'] = macd['MACDh_12_26_9']
-            
-            # Volume indicators
-            df['volume_sma'] = ta.sma(df['volume'], length=20)
-        else:
-            # Use fallback implementation
-            df['sma_10'] = ta.sma(df['close'], 10)
-            df['sma_20'] = ta.sma(df['close'], 20)
-            df['ema_10'] = ta.ema(df['close'], 10)
-            df['ema_20'] = ta.ema(df['close'], 20)
-            
-            # Momentum indicators
-            df['rsi'] = ta.rsi(df['close'], 14)
-            df['stoch_k'] = ta.stochastic_k(df['high'], df['low'], df['close'], 14)
-            
-            # Volatility indicators
-            bb_upper, bb_middle, bb_lower = ta.bollinger_bands(df['close'], 20, 2)
-            df['bb_upper'] = bb_upper
-            df['bb_lower'] = bb_lower
-            df['bb_middle'] = bb_middle
-            df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / df['bb_middle']
-            df['atr'] = ta.atr(df['high'], df['low'], df['close'], 14)
-            
-            # MACD
-            macd_line, macd_signal, macd_histogram = ta.macd(df['close'], 12, 26, 9)
-            df['macd'] = macd_line
-            df['macd_signal'] = macd_signal
-            df['macd_histogram'] = macd_histogram
-            
-            # Volume indicators
-            df['volume_sma'] = ta.sma(df['volume'], 20)
+        # Check if we have enough data for technical indicators
+        min_data_required = 30  # Minimum data points needed for most indicators
+        if len(df) < min_data_required:
+            raise ValueError(f"Insufficient data for technical indicators. Need at least {min_data_required} data points, got {len(df)}")
+        
+        # Technical indicators using pandas_ta
+        df['sma_10'] = ta.sma(df['close'], length=10)
+        df['sma_20'] = ta.sma(df['close'], length=20)
+        df['ema_10'] = ta.ema(df['close'], length=10)
+        df['ema_20'] = ta.ema(df['close'], length=20)
+        
+        # Momentum indicators
+        rsi_result = ta.rsi(df['close'], length=14)
+        if rsi_result is None:
+            raise ValueError("Failed to calculate RSI. Check if data is valid.")
+        df['rsi'] = rsi_result
+        
+        stoch = ta.stoch(df['high'], df['low'], df['close'])
+        if stoch is None or not isinstance(stoch, pd.DataFrame) or 'STOCHk_14_3_3' not in stoch.columns:
+            raise ValueError("Failed to calculate Stochastic oscillator. Check if data is valid.")
+        df['stoch_k'] = stoch['STOCHk_14_3_3']
+        
+        # Volatility indicators
+        bb = ta.bbands(df['close'], length=20)
+        if bb is None or not isinstance(bb, pd.DataFrame):
+            raise ValueError("Failed to calculate Bollinger Bands. Check if data is valid.")
+        df['bb_upper'] = bb['BBU_20_2.0']
+        df['bb_lower'] = bb['BBL_20_2.0'] 
+        df['bb_middle'] = bb['BBM_20_2.0']
+        df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / df['bb_middle']
+        
+        atr_result = ta.atr(df['high'], df['low'], df['close'], length=14)
+        if atr_result is None:
+            raise ValueError("Failed to calculate ATR. Check if data is valid.")
+        df['atr'] = atr_result
+        
+        # MACD
+        macd = ta.macd(df['close'])
+        if macd is None or not isinstance(macd, pd.DataFrame):
+            raise ValueError("Failed to calculate MACD. Check if data is valid.")
+        df['macd'] = macd['MACD_12_26_9']
+        df['macd_signal'] = macd['MACDs_12_26_9']
+        df['macd_histogram'] = macd['MACDh_12_26_9']
+        
+        # Volume indicators
+        volume_sma = ta.sma(df['volume'], length=20)
+        if volume_sma is None:
+            raise ValueError("Failed to calculate volume SMA. Check if data is valid.")
+        df['volume_sma'] = volume_sma
         
         df['volume_ratio'] = df['volume'] / df['volume_sma']
         
@@ -286,6 +287,7 @@ class FuturesTradingEnv(gym.Env):
         
         # Drop NaN values
         df.dropna(inplace=True)
+        logging.info(f"Data shape after dropna: {df.shape}")
         
         # Select feature columns
         feature_cols = [
@@ -295,19 +297,28 @@ class FuturesTradingEnv(gym.Env):
             'volume_ratio', 'price_position'
         ]
         
-        self.feature_columns = df[feature_cols].copy()
+        # Check which feature columns are available
+        available_cols = [col for col in feature_cols if col in df.columns]
+        missing_cols = [col for col in feature_cols if col not in df.columns]
+        
+        if missing_cols:
+            logging.warning(f"Missing feature columns: {missing_cols}")
+        if not available_cols:
+            raise ValueError(f"No feature columns available. Available columns: {list(df.columns)}")
+            
+        logging.info(f"Using {len(available_cols)} feature columns: {available_cols}")
+        
+        self.feature_columns = df[available_cols].copy()
         self.price_data = df[['open', 'high', 'low', 'close', 'volume', 'timestamp']].copy()
         
-        # FIX FOR DATA LEAKAGE: Proper feature scaling without lookahead bias
-        if StandardScaler is None:
-            logging.warning("StandardScaler not available. Using SimpleStandardScaler fallback.")
-            self.scaler = SimpleStandardScaler()
-        else:
-            self.scaler = StandardScaler()
+        # Feature scaling using scikit-learn StandardScaler
+        self.scaler = StandardScaler()
         
         # Determine training split for scaler fitting
         if training_end_idx is None:
             # Use first 70% of data for fitting scaler (avoid lookahead bias)
+            if len(self.feature_columns) == 0:
+                raise ValueError("No feature columns available for training. Check if technical indicators were calculated successfully.")
             training_end_idx = int(len(self.feature_columns) * 0.7)
             logging.info(f"Using first {training_end_idx} samples ({training_end_idx/len(self.feature_columns):.1%}) for scaler fitting")
         
@@ -343,6 +354,7 @@ class FuturesTradingEnv(gym.Env):
         # Risk management
         self.stop_loss_price = None
         self.take_profit_price = None
+        self.liquidation_price = None  # Real-time liquidation price
         
         # Trade tracking
         self.trade_id = 0
@@ -488,7 +500,14 @@ class FuturesTradingEnv(gym.Env):
         
         # Check if we have enough equity
         required_margin = trade_value / self.max_leverage
+        
+        # Debug logging
+        logging.debug(f"Opening position: target_size={target_position_size:.6f}, price=${current_price:.2f}")
+        logging.debug(f"Trade value: ${trade_value:.2f}, Fee: ${fee:.2f}, Required margin: ${required_margin:.2f}")
+        logging.debug(f"Current equity: ${self.equity:.2f}")
+        
         if required_margin + fee > self.equity:
+            logging.warning(f"Insufficient equity: need ${required_margin + fee:.2f}, have ${self.equity:.2f}")
             return  # Not enough equity
         
         # Close existing position if any
@@ -513,6 +532,9 @@ class FuturesTradingEnv(gym.Env):
         else:  # Short
             self.stop_loss_price = current_price * (1 + self.stop_loss_pct)
             self.take_profit_price = current_price * (1 - self.take_profit_pct)
+        
+        # Calculate realistic liquidation price based on maintenance margin
+        self.liquidation_price = self._calculate_liquidation_price()
         
         # Track trade start
         self.trade_start_step = self.current_step
@@ -573,6 +595,7 @@ class FuturesTradingEnv(gym.Env):
         self.leverage = 0.0
         self.stop_loss_price = None
         self.take_profit_price = None
+        self.liquidation_price = None
         
         # Update episode stats
         self.episode_trades += 1
@@ -623,18 +646,203 @@ class FuturesTradingEnv(gym.Env):
         self.logger.log_trade(trade_data)
         self.trade_id += 1
     
+    def _calculate_liquidation_price(self) -> Optional[float]:
+        """
+        Calculate realistic liquidation price based on maintenance margin requirements.
+        
+        Liquidation Price Formula for Long Position:
+        LP = Entry Price * (1 - Initial Margin Rate + Maintenance Margin Rate - Liquidation Fee Rate)
+        
+        Liquidation Price Formula for Short Position:
+        LP = Entry Price * (1 + Initial Margin Rate - Maintenance Margin Rate + Liquidation Fee Rate)
+        
+        Returns:
+            Liquidation price or None if no position
+        """
+        if self.position_size == 0 or self.leverage == 0:
+            return None
+        
+        # Calculate initial margin rate from leverage
+        initial_margin_rate = 1.0 / self.leverage
+        
+        if self.position_side == 1:  # Long position
+            # For long: liquidation occurs when price falls to maintenance margin level
+            liquidation_price = self.entry_price * (
+                1 - initial_margin_rate + self.maintenance_margin_rate - self.liquidation_fee_rate
+            )
+        else:  # Short position
+            # For short: liquidation occurs when price rises to maintenance margin level
+            liquidation_price = self.entry_price * (
+                1 + initial_margin_rate - self.maintenance_margin_rate + self.liquidation_fee_rate
+            )
+        
+        return max(liquidation_price, 0.01)  # Ensure price is positive
+    
+    def _calculate_maintenance_margin_required(self, mark_price: float) -> float:
+        """
+        Calculate the maintenance margin required for current position at given mark price.
+        
+        Args:
+            mark_price: Current market price to evaluate margin at
+            
+        Returns:
+            Required maintenance margin in quote currency
+        """
+        if self.position_size == 0:
+            return 0.0
+        
+        position_value = abs(self.position_size * mark_price)
+        return position_value * self.maintenance_margin_rate
+    
+    def _calculate_margin_balance(self, mark_price: float) -> float:
+        """
+        Calculate current margin balance (wallet balance + unrealized PnL).
+        
+        Args:
+            mark_price: Current market price
+            
+        Returns:
+            Current margin balance
+        """
+        # Calculate unrealized PnL at mark price
+        if self.position_size == 0:
+            unrealized_pnl = 0.0
+        elif self.position_side == 1:  # Long
+            unrealized_pnl = self.position_size * (mark_price - self.entry_price)
+        else:  # Short
+            unrealized_pnl = self.position_size * (self.entry_price - mark_price)
+        
+        return self.balance + unrealized_pnl
+    
+    def position_side_str(self) -> str:
+        """Get human-readable position side"""
+        if self.position_side == 1:
+            return "LONG"
+        elif self.position_side == -1:
+            return "SHORT"
+        else:
+            return "FLAT"
+    
+    def get_liquidation_info(self) -> Dict[str, Any]:
+        """
+        Get detailed liquidation information for current position.
+        
+        Returns:
+            Dict with liquidation price, margin ratios, and risk metrics
+        """
+        if self.position_size == 0:
+            return {
+                "position_status": "No position",
+                "liquidation_price": None,
+                "margin_ratio": None,
+                "liquidation_distance": None
+            }
+        
+        current_price = self.price_data.iloc[self.current_step]['close']
+        margin_balance = self._calculate_margin_balance(current_price)
+        maintenance_margin_required = self._calculate_maintenance_margin_required(current_price)
+        
+        # Calculate margin ratio (margin balance / maintenance margin required)
+        margin_ratio = margin_balance / maintenance_margin_required if maintenance_margin_required > 0 else float('inf')
+        
+        # Calculate distance to liquidation price
+        if self.liquidation_price:
+            liquidation_distance = abs(current_price - self.liquidation_price) / current_price
+        else:
+            liquidation_distance = None
+        
+        return {
+            "position_status": f"{self.position_side_str()} {abs(self.position_size):.4f}",
+            "entry_price": self.entry_price,
+            "current_price": current_price,
+            "liquidation_price": self.liquidation_price,
+            "margin_balance": margin_balance,
+            "maintenance_margin_required": maintenance_margin_required,
+            "margin_ratio": margin_ratio,
+            "liquidation_distance_pct": f"{liquidation_distance:.2%}" if liquidation_distance else None,
+            "leverage": self.leverage,
+            "position_value": abs(self.position_size * current_price),
+            "unrealized_pnl": self.unrealized_pnl,
+            "liquidation_risk": "HIGH" if margin_ratio < 1.5 else "MEDIUM" if margin_ratio < 3.0 else "LOW"
+        }
+    
     def _check_liquidation(self, current_low: float, current_high: float) -> bool:
-        """Check if position should be liquidated"""
-        if self.position_size == 0 or self.leverage < 5:  # Only check for high leverage
+        """
+        Check if position should be liquidated based on realistic maintenance margin requirements.
+        
+        This implements Binance-style liquidation:
+        1. Calculate liquidation price based on maintenance margin
+        2. Check if mark price touched liquidation price
+        3. Execute liquidation with liquidation fee
+        
+        Args:
+            current_low: Lowest price in current candle
+            current_high: Highest price in current candle
+            
+        Returns:
+            True if liquidation was triggered, False otherwise
+        """
+        if self.position_size == 0 or self.liquidation_price is None:
             return False
         
-        # Simplified liquidation check
-        # Real Binance liquidation is more complex with maintenance margin
-        liquidation_threshold = 0.9  # 90% of equity lost
+        liquidation_triggered = False
+        liquidation_price_hit = None
         
-        if self.equity <= self.initial_equity * (1 - liquidation_threshold):
+        if self.position_side == 1:  # Long position
+            # Long liquidation: check if low price hit liquidation price
+            if current_low <= self.liquidation_price:
+                liquidation_triggered = True
+                liquidation_price_hit = self.liquidation_price
+        else:  # Short position
+            # Short liquidation: check if high price hit liquidation price
+            if current_high >= self.liquidation_price:
+                liquidation_triggered = True
+                liquidation_price_hit = self.liquidation_price
+        
+        if liquidation_triggered:
+            # Calculate liquidation with realistic fees and slippage
+            position_value = abs(self.position_size * liquidation_price_hit)
+            liquidation_fee = position_value * self.liquidation_fee_rate
+            
+            # Calculate PnL at liquidation price
+            if self.position_side == 1:  # Long
+                pnl = self.position_size * (liquidation_price_hit - self.entry_price)
+            else:  # Short
+                pnl = self.position_size * (self.entry_price - liquidation_price_hit)
+            
+            # Apply liquidation fee (taken from remaining balance)
+            pnl -= liquidation_fee
+            
+            # Update balance with liquidation result
+            self.balance += pnl
+            self.total_realized_pnl += pnl
+            self.last_trade_pnl = pnl
             self.liquidated = True
-            self._close_position((current_high + current_low) / 2, "LIQUIDATION")
+            
+            logging.warning(
+                f"LIQUIDATION: {self.position_side_str()} position liquidated at {liquidation_price_hit:.2f}, "
+                f"PnL: {pnl:.2f}, Fee: {liquidation_fee:.2f}"
+            )
+            
+            # Log liquidation trade
+            if self.logger:
+                self._log_trade(liquidation_price_hit, pnl, "LIQUIDATION")
+            
+            # Reset position
+            self.position_size = 0.0
+            self.position_side = 0
+            self.entry_price = 0.0
+            self.margin_used = 0.0
+            self.unrealized_pnl = 0.0
+            self.leverage = 0.0
+            self.stop_loss_price = None
+            self.take_profit_price = None
+            self.liquidation_price = None
+            
+            # Update episode stats
+            self.episode_trades += 1
+            self.episode_profit += pnl
+            
             return True
         
         return False
@@ -864,6 +1072,10 @@ class FuturesTradingEnv(gym.Env):
             'unrealized_pnl': self.unrealized_pnl,
             'total_realized_pnl': self.total_realized_pnl,
             
+            # Liquidation info
+            'liquidation_price': self.liquidation_price,
+            'liquidation_info': self.get_liquidation_info(),
+            
             # Risk management info
             'consecutive_losses': self.consecutive_losses,
             'consecutive_wins': self.consecutive_wins,
@@ -902,6 +1114,16 @@ class FuturesTradingEnv(gym.Env):
             print(f"Unrealized PnL: {self.unrealized_pnl:.2f}")
             print(f"Total Realized PnL: {self.total_realized_pnl:.2f}")
             print(f"Drawdown: {drawdown:.1%}")
+            
+            # Liquidation information
+            if self.liquidation_price:
+                liquidation_distance = abs(current_price - self.liquidation_price) / current_price
+                print(f"Liquidation Price: {self.liquidation_price:.2f} ({liquidation_distance:.2%} away)")
+                
+                liquidation_info = self.get_liquidation_info()
+                if liquidation_info.get('margin_ratio'):
+                    print(f"Margin Ratio: {liquidation_info['margin_ratio']:.2f} ({liquidation_info['liquidation_risk']} risk)")
+            
             print(f"Consecutive Losses: {self.consecutive_losses}")
             print(f"Loss Penalty Multiplier: {self.loss_penalty_multiplier:.2f}x")
             print(f"Balance Trend: {self.balance_trend_slope:.6f}")
@@ -1166,43 +1388,3 @@ class FuturesTradingEnv(gym.Env):
         logging.info(f"  Step size: {step_size} samples")
         
         return environments
-    
-
-class SimpleStandardScaler:
-    """
-    Simple fallback implementation of StandardScaler when scikit-learn is not available
-    """
-    def __init__(self):
-        self.mean_ = None
-        self.scale_ = None
-        self.n_features_in_ = None
-        self.n_samples_seen_ = None
-    
-    def fit(self, X):
-        """Fit scaler to training data"""
-        if isinstance(X, pd.DataFrame):
-            X = X.values
-        
-        self.mean_ = np.mean(X, axis=0)
-        self.scale_ = np.std(X, axis=0)
-        # Avoid division by zero
-        self.scale_[self.scale_ == 0] = 1.0
-        self.n_features_in_ = X.shape[1]
-        self.n_samples_seen_ = X.shape[0]
-        return self
-    
-    def transform(self, X):
-        """Transform data using fitted parameters"""
-        if self.mean_ is None or self.scale_ is None:
-            raise ValueError("Scaler has not been fitted yet")
-        
-        if isinstance(X, pd.DataFrame):
-            X_values = X.values
-        else:
-            X_values = X
-        
-        return (X_values - self.mean_) / self.scale_
-    
-    def fit_transform(self, X):
-        """Fit scaler and transform data"""
-        return self.fit(X).transform(X)
