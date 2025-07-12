@@ -293,6 +293,19 @@ def get_training_parameters() -> Dict[str, Any]:
         show_default=True
     )
     
+    # Enhanced Liquidation Parameters
+    params['maintenance_margin_rate'] = FloatPrompt.ask(
+        "⚖️ Maintenance margin rate (0.004 = 0.4%)",
+        default=0.004,
+        show_default=True
+    )
+    
+    params['liquidation_fee_rate'] = FloatPrompt.ask(
+        "💸 Liquidation fee rate (0.005 = 0.5%)",
+        default=0.005,
+        show_default=True
+    )
+    
     # Number of parallel environments
     params['n_envs'] = IntPrompt.ask(
         "🔄 Number of parallel environments",
@@ -383,6 +396,8 @@ def create_environment(df: pd.DataFrame, params: Dict[str, Any], log_file: str =
         window_size=params['window_size'],
         stop_loss_pct=params['stop_loss_pct'],
         take_profit_pct=params['take_profit_pct'],
+        maintenance_margin_rate=params['maintenance_margin_rate'],
+        liquidation_fee_rate=params['liquidation_fee_rate'],
         log_file=log_file,
         training_iteration=training_iteration
     )
