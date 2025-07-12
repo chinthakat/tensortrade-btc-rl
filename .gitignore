@@ -155,8 +155,58 @@ models/*.pth
 models/*.pkl
 models/*.h5
 models/*.onnx
+models/*.pt
+models/*.zip
+models/*.joblib
+models/*.model
+models/*.bin
+models/*.pb
+models/*.tflite
+models/*.weights
+models/*.params
+models/*.safetensors
 episodes/
 checkpoints/
+weights/
+saved_models/
+artifacts/
+mlruns/
+wandb/
+*.ckpt
+*.state_dict
+*.tar
+best_model.*
+latest_model.*
+model_*.zip
+model_*.pth
+model_*.pkl
+
+# TensorBoard logs
+tensorboard_logs/
+tb_logs/
+runs/
+experiment_logs/
+
+# MLflow tracking
+mlruns/
+mlartifacts/
+
+# Weights & Biases
+wandb/
+
+# PyTorch Lightning logs
+lightning_logs/
+
+# Hydra configuration outputs
+outputs/
+.hydra/
+
+# Ray Tune/RLlib artifacts
+ray_results/
+~/ray_results/
+
+# Stable Baselines3 specific
+*.zip
 
 # Logs and outputs
 logs/
@@ -164,21 +214,44 @@ logs/
 trading_logs/
 backtest_logs/
 live_trading_logs/
-tensorboard_logs/
+training_logs/
+evaluation_logs/
+*.out
+*.err
 
 # Generated reports and plots
 backtest_reports/
 backtest_plots/
 performance_reports/
+trading_reports/
+model_reports/
+evaluation_results/
 *.html
 *.png
 *.jpg
 *.pdf
+*.svg
 
-# Temporary files
+# Temporary files and caches
 temp/
 tmp/
 *.tmp
+.cache/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.coverage
+.tensorboard_cache/
+
+# Data processing artifacts
+preprocessed_data/
+processed_data/
+feature_cache/
+scaler_cache/
+*.npy
+*.npz
+*.pickle
 
 # OS specific files
 .DS_Store
