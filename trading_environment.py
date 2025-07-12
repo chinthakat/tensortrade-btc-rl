@@ -139,8 +139,16 @@ class FuturesTradingEnv(gym.Env):
         taker_fee: float = 0.0004,  # 0.04%
         funding_rate: float = 0.0001,  # 0.01% per 8 hours
         window_size: int = 60,
-        stop_loss_pct: float = 0.02,  # 2%
-        take_profit_pct: float = 0.04,  # 4%
+        stop_loss_pct: float = 0.02,  # 2% - fallback for fixed mode
+        take_profit_pct: float = 0.04,  # 4% - fallback for fixed mode
+        # Dynamic Stop-Loss and Take-Profit Configuration
+        use_dynamic_stops: bool = True,  # Enable ATR-based dynamic stops
+        atr_stop_loss_multiplier: float = 2.0,  # Stop-loss = ATR * multiplier
+        atr_take_profit_multiplier: float = 3.0,  # Take-profit = ATR * multiplier
+        min_stop_loss_pct: float = 0.005,  # 0.5% minimum stop-loss
+        max_stop_loss_pct: float = 0.08,  # 8% maximum stop-loss
+        min_take_profit_pct: float = 0.01,  # 1% minimum take-profit
+        max_take_profit_pct: float = 0.15,  # 15% maximum take-profit
         log_file: str = None,
         training_iteration: int = 0,
         training_split_ratio: float = 0.7,  # Use 70% of data for scaler fitting
@@ -149,7 +157,9 @@ class FuturesTradingEnv(gym.Env):
         maintenance_margin_rate: float = 0.004,  # 0.4% for most symbols at moderate leverage
         liquidation_fee_rate: float = 0.005,  # 0.5% liquidation fee
         # Enhanced action space control
-        use_advanced_action_space: bool = False  # Toggle between simple and advanced action space
+        use_advanced_action_space: bool = False,  # Toggle between simple and advanced action space
+        # Configurable Reward Function Parameters
+        reward_config: Optional[Dict[str, float]] = None
     ):
         super().__init__()
         
@@ -162,6 +172,15 @@ class FuturesTradingEnv(gym.Env):
         self.window_size = window_size
         self.stop_loss_pct = stop_loss_pct
         self.take_profit_pct = take_profit_pct
+        
+        # Dynamic stop-loss and take-profit configuration
+        self.use_dynamic_stops = use_dynamic_stops
+        self.atr_stop_loss_multiplier = atr_stop_loss_multiplier
+        self.atr_take_profit_multiplier = atr_take_profit_multiplier
+        self.min_stop_loss_pct = min_stop_loss_pct
+        self.max_stop_loss_pct = max_stop_loss_pct
+        self.min_take_profit_pct = min_take_profit_pct
+        self.max_take_profit_pct = max_take_profit_pct
         self.training_iteration = training_iteration
         self.training_split_ratio = training_split_ratio
         self.training_end_idx = training_end_idx
@@ -172,6 +191,9 @@ class FuturesTradingEnv(gym.Env):
         
         # Enhanced action space control
         self.use_advanced_action_space = use_advanced_action_space
+        
+        # Configure reward function parameters
+        self._setup_reward_config(reward_config)
         
         # Initialize logger
         if log_file:
@@ -419,16 +441,27 @@ class FuturesTradingEnv(gym.Env):
         # Parse action based on action space type
         if self.use_advanced_action_space:
             # Advanced action space: Dict with leverage and risk_percentage
-            leverage = action['leverage'][0] if isinstance(action['leverage'], np.ndarray) else action['leverage']
-            risk_percentage = action['risk_percentage'][0] if isinstance(action['risk_percentage'], np.ndarray) else action['risk_percentage']
+            if isinstance(action, dict):
+                leverage = action['leverage'][0] if isinstance(action['leverage'], np.ndarray) else action['leverage']
+                risk_percentage = action['risk_percentage'][0] if isinstance(action['risk_percentage'], np.ndarray) else action['risk_percentage']
+            else:
+                # If action is from wrapper, it's a numpy array [leverage, risk_percentage]
+                leverage = action[0]
+                risk_percentage = action[1]
             
             # Clip values to valid ranges
-            leverage = np.clip(leverage, -self.max_leverage, self.max_leverage)
-            risk_percentage = np.clip(risk_percentage, 0.01, 1.0)
+            leverage = float(np.clip(leverage, -self.max_leverage, self.max_leverage))
+            risk_percentage = float(np.clip(risk_percentage, 0.01, 1.0))
         else:
             # Legacy action space: single leverage value
-            leverage = action[0] if isinstance(action, np.ndarray) else action
-            leverage = np.clip(leverage, -self.max_leverage, self.max_leverage)
+            if isinstance(action, dict):
+                # This shouldn't happen in legacy mode, but handle gracefully
+                leverage = action.get('leverage', 0.0)
+                if isinstance(leverage, (list, np.ndarray)):
+                    leverage = leverage[0]
+            else:
+                leverage = action[0] if isinstance(action, (list, np.ndarray)) else action
+            leverage = float(np.clip(leverage, -self.max_leverage, self.max_leverage))
             risk_percentage = 1.0  # Use full equity (legacy behavior)
         
         # Store previous state
@@ -626,18 +659,111 @@ class FuturesTradingEnv(gym.Env):
             )
     
     def _update_stop_loss_take_profit(self, current_price: float):
-        """Update stop-loss and take-profit prices for current position"""
+        """Update stop-loss and take-profit prices with dynamic ATR-based calculation"""
         if abs(self.position_size) < 0.001:
             self.stop_loss_price = None
             self.take_profit_price = None
             return
         
-        if self.position_side == 1:  # Long
-            self.stop_loss_price = current_price * (1 - self.stop_loss_pct)
-            self.take_profit_price = current_price * (1 + self.take_profit_pct)
-        else:  # Short
-            self.stop_loss_price = current_price * (1 + self.stop_loss_pct)
-            self.take_profit_price = current_price * (1 - self.take_profit_pct)
+        if self.use_dynamic_stops:
+            # Get current ATR value for dynamic calculation
+            current_atr = self._get_current_atr(current_price)
+            
+            # Calculate dynamic stop-loss and take-profit percentages
+            dynamic_stop_pct, dynamic_tp_pct = self._calculate_dynamic_stops(current_atr, current_price)
+            
+            if self.position_side == 1:  # Long
+                self.stop_loss_price = current_price * (1 - dynamic_stop_pct)
+                self.take_profit_price = current_price * (1 + dynamic_tp_pct)
+            else:  # Short
+                self.stop_loss_price = current_price * (1 + dynamic_stop_pct)
+                self.take_profit_price = current_price * (1 - dynamic_tp_pct)
+        else:
+            # Fallback to fixed percentages
+            if self.position_side == 1:  # Long
+                self.stop_loss_price = current_price * (1 - self.stop_loss_pct)
+                self.take_profit_price = current_price * (1 + self.take_profit_pct)
+            else:  # Short
+                self.stop_loss_price = current_price * (1 + self.stop_loss_pct)
+                self.take_profit_price = current_price * (1 - self.take_profit_pct)
+    
+    def _get_current_atr(self, current_price: float) -> float:
+        """Get current ATR value from the feature data (before scaling)"""
+        try:
+            # ATR is in the original feature columns, not price_data
+            current_atr = self.feature_columns.iloc[self.current_step]['atr']
+            
+            # Handle NaN or invalid ATR values
+            if pd.isna(current_atr) or current_atr <= 0:
+                # Fallback: use recent ATR or calculate a simple estimate
+                recent_atr_values = self.feature_columns.iloc[max(0, self.current_step-10):self.current_step+1]['atr'].dropna()
+                if len(recent_atr_values) > 0:
+                    current_atr = recent_atr_values.iloc[-1]
+                else:
+                    # Final fallback: estimate ATR as 1% of current price
+                    current_atr = current_price * 0.01
+                    
+            return float(current_atr)
+        except (KeyError, IndexError):
+            # Fallback if ATR column doesn't exist or index error
+            return current_price * 0.01
+    
+    def _calculate_dynamic_stops(self, atr: float, current_price: float) -> tuple[float, float]:
+        """
+        Calculate dynamic stop-loss and take-profit percentages based on ATR
+        
+        Args:
+            atr: Current Average True Range value
+            current_price: Current market price
+            
+        Returns:
+            Tuple of (stop_loss_percentage, take_profit_percentage)
+        """
+        # Convert ATR to percentage of current price
+        atr_percentage = atr / current_price
+        
+        # Calculate dynamic stop-loss and take-profit
+        dynamic_stop_pct = atr_percentage * self.atr_stop_loss_multiplier
+        dynamic_tp_pct = atr_percentage * self.atr_take_profit_multiplier
+        
+        # Apply minimum and maximum bounds for risk management
+        dynamic_stop_pct = max(self.min_stop_loss_pct, 
+                              min(self.max_stop_loss_pct, dynamic_stop_pct))
+        
+        dynamic_tp_pct = max(self.min_take_profit_pct, 
+                            min(self.max_take_profit_pct, dynamic_tp_pct))
+        
+        return dynamic_stop_pct, dynamic_tp_pct
+    
+    def get_dynamic_stops_info(self) -> Dict[str, float]:
+        """Get information about current dynamic stop-loss and take-profit settings"""
+        if not self.use_dynamic_stops:
+            return {
+                'mode': 'fixed',
+                'stop_loss_pct': self.stop_loss_pct,
+                'take_profit_pct': self.take_profit_pct
+            }
+        
+        try:
+            current_price = self.price_data.iloc[self.current_step]['close']
+            current_atr = self._get_current_atr(current_price)
+            atr_percentage = current_atr / current_price
+            
+            dynamic_stop_pct, dynamic_tp_pct = self._calculate_dynamic_stops(current_atr, current_price)
+            
+            return {
+                'mode': 'dynamic',
+                'current_atr': current_atr,
+                'atr_percentage': atr_percentage,
+                'dynamic_stop_loss_pct': dynamic_stop_pct,
+                'dynamic_take_profit_pct': dynamic_tp_pct,
+                'atr_stop_multiplier': self.atr_stop_loss_multiplier,
+                'atr_tp_multiplier': self.atr_take_profit_multiplier,
+                'stop_loss_price': self.stop_loss_price,
+                'take_profit_price': self.take_profit_price
+            }
+        except Exception as e:
+            return {'mode': 'dynamic', 'error': str(e)}
     
     def _open_or_adjust_position(self, target_position_size: float, current_price: float):
         """
@@ -987,95 +1113,105 @@ class FuturesTradingEnv(gym.Env):
         else:
             equity_change = 0.0
         
-        # Scale and cap base reward
-        base_reward = equity_change * 100
-        base_reward = np.clip(base_reward, -10.0, 10.0)  # Cap base reward
+        # Scale and cap base reward using configurable parameters
+        base_reward = equity_change * self.reward_config['base_reward_scale']
+        base_reward = np.clip(base_reward, 
+                            self.reward_config['base_reward_cap_negative'], 
+                            self.reward_config['base_reward_cap_positive'])
         
         # === RISK-ADJUSTED COMPONENTS ===
         risk_penalty = 0.0
         balance_penalty = 0.0
         trend_penalty = 0.0
         
-        # 1. Drawdown penalties (progressive)
+        # 1. Drawdown penalties (progressive) - using configurable parameters
         if len(self.equity_history) > 1:
             drawdown = (self.max_equity - self.equity) / self.max_equity
             
-            if drawdown > 0.5:  # >50% drawdown
-                risk_penalty += 20.0
-            elif drawdown > 0.3:  # >30% drawdown
-                risk_penalty += 10.0
-            elif drawdown > 0.1:  # >10% drawdown
-                risk_penalty += 5.0
+            if drawdown > self.reward_config['severe_drawdown_threshold']:  # >50% drawdown (configurable)
+                risk_penalty += self.reward_config['severe_drawdown_penalty']
+            elif drawdown > self.reward_config['major_drawdown_threshold']:  # >30% drawdown (configurable)
+                risk_penalty += self.reward_config['major_drawdown_penalty']
+            elif drawdown > self.reward_config['moderate_drawdown_threshold']:  # >10% drawdown (configurable)
+                risk_penalty += self.reward_config['moderate_drawdown_penalty']
             else:
-                risk_penalty += drawdown * 25  # Linear penalty for smaller drawdowns
+                risk_penalty += drawdown * self.reward_config['linear_drawdown_multiplier']  # Linear penalty for smaller drawdowns
         
-        # 2. Balance decline penalties (progressive)
+        # 2. Balance decline penalties (progressive) - using configurable parameters
         equity_ratio = self.equity / self.initial_equity
         
-        if equity_ratio <= 0.05:  # ≤5% remaining - SEVERE
-            balance_penalty = 50.0
-        elif equity_ratio <= 0.10:  # ≤10% remaining - CRITICAL
-            balance_penalty = 30.0
-        elif equity_ratio <= 0.20:  # ≤20% remaining - MAJOR
-            balance_penalty = 20.0
-        elif equity_ratio <= 0.30:  # ≤30% remaining - MODERATE
-            balance_penalty = 10.0
-        elif equity_ratio <= 0.50:  # ≤50% remaining - MINOR
-            balance_penalty = 5.0
+        if equity_ratio <= self.reward_config['critical_equity_threshold']:  # ≤5% remaining - CRITICAL
+            balance_penalty = self.reward_config['critical_equity_penalty']
+        elif equity_ratio <= self.reward_config['severe_equity_threshold']:  # ≤10% remaining - SEVERE
+            balance_penalty = self.reward_config['severe_equity_penalty']
+        elif equity_ratio <= self.reward_config['major_equity_threshold']:  # ≤20% remaining - MAJOR
+            balance_penalty = self.reward_config['major_equity_penalty']
+        elif equity_ratio <= self.reward_config['moderate_equity_threshold']:  # ≤30% remaining - MODERATE
+            balance_penalty = self.reward_config['moderate_equity_penalty']
+        elif equity_ratio <= self.reward_config['minor_equity_threshold']:  # ≤50% remaining - MINOR
+            balance_penalty = self.reward_config['minor_equity_penalty']
         
-        # 3. Consecutive loss penalties
+        # 3. Consecutive loss penalties - using configurable parameters
         consecutive_loss_penalty = 0.0
         if self.consecutive_losses > 0:
             # Exponential penalty for consecutive losses
-            consecutive_loss_penalty = min(15.0, self.consecutive_losses ** 1.5)
+            consecutive_loss_penalty = min(
+                self.reward_config['consecutive_loss_cap'], 
+                self.consecutive_losses ** self.reward_config['consecutive_loss_exponent']
+            )
         
-        # 4. Balance trend penalty (declining balance over time)
+        # 4. Balance trend penalty (declining balance over time) - using configurable parameters
         if self.balance_trend_slope < 0:  # Declining balance
-            trend_penalty = abs(self.balance_trend_slope) * 1000  # Scale the slope
-            trend_penalty = min(trend_penalty, 8.0)  # Cap trend penalty
+            trend_penalty = abs(self.balance_trend_slope) * self.reward_config['trend_penalty_multiplier']  # Scale the slope
+            trend_penalty = min(trend_penalty, self.reward_config['trend_penalty_cap'])  # Cap trend penalty
         
-        # 5. Volatility penalty
+        # 5. Volatility penalty - using configurable parameters
         volatility_penalty = 0.0
-        if len(self.returns_history) > 10:
+        if len(self.returns_history) > self.reward_config['volatility_history_threshold']:
             volatility = np.std(list(self.returns_history))
-            volatility_penalty = min(volatility * 15, 5.0)  # Cap volatility penalty
+            volatility_penalty = min(volatility * self.reward_config['volatility_multiplier'], 
+                                   self.reward_config['volatility_penalty_cap'])  # Cap volatility penalty
         
-        # 6. Trading cost penalty
+        # 6. Trading cost penalty - using configurable parameters
         cost_penalty = 0.0
         if hasattr(self, '_last_fees') and self._last_fees > 0:
-            cost_penalty = min(self._last_fees * 500, 2.0)  # Cap cost penalty
+            cost_penalty = min(self._last_fees * self.reward_config['cost_penalty_multiplier'], 
+                             self.reward_config['cost_penalty_cap'])  # Cap cost penalty
         
-        # 7. Special penalties
+        # 7. Special penalties - using configurable parameters
         special_penalty = 0.0
         
         # Liquidation penalty
         if self.liquidated:
-            special_penalty += 25.0
+            special_penalty += self.reward_config['liquidation_penalty']
         
         # Excessive leverage penalty
-        if self.leverage > 20:
-            special_penalty += (self.leverage - 20) * 0.5
+        if self.leverage > self.reward_config['excessive_leverage_threshold']:
+            special_penalty += (self.leverage - self.reward_config['excessive_leverage_threshold']) * self.reward_config['excessive_leverage_multiplier']
         
-        # === POSITIVE REWARDS ===
+        # === POSITIVE REWARDS === - using configurable parameters
         positive_bonus = 0.0
         
         # Position holding bonus (encourage longer-term thinking)
         if self.position_size != 0 and self.trade_start_step:
             hold_duration = self.current_step - self.trade_start_step
-            if 4 <= hold_duration <= 24:  # 1-6 hours optimal
-                positive_bonus += 0.5
-            elif hold_duration > 24:  # Penalize too long holds
-                positive_bonus -= 0.3
+            if (self.reward_config['optimal_hold_min'] <= hold_duration <= 
+                self.reward_config['optimal_hold_max']):  # Optimal hold duration
+                positive_bonus += self.reward_config['position_hold_bonus']
+            elif hold_duration > self.reward_config['excessive_hold_threshold']:  # Penalize too long holds
+                positive_bonus -= self.reward_config['position_hold_penalty']
         
         # Consecutive wins bonus
         if self.consecutive_wins > 0:
-            positive_bonus += min(self.consecutive_wins * 0.2, 2.0)  # Cap wins bonus
+            positive_bonus += min(self.consecutive_wins * self.reward_config['consecutive_wins_multiplier'], 
+                                self.reward_config['consecutive_wins_cap'])  # Cap wins bonus
         
         # Recovery bonus (recovering from drawdown)
         if len(self.equity_history) > 5:
             recent_improvement = (self.equity - min(list(self.equity_history)[-5:])) / self.initial_equity
-            if recent_improvement > 0.05:  # 5% improvement
-                positive_bonus += min(recent_improvement * 20, 3.0)
+            if recent_improvement > self.reward_config['recovery_threshold']:  # Configurable% improvement
+                positive_bonus += min(recent_improvement * self.reward_config['recovery_multiplier'], 
+                                    self.reward_config['recovery_bonus_cap'])
         
         # === COMBINE ALL COMPONENTS ===
         total_penalty = (
@@ -1094,16 +1230,16 @@ class FuturesTradingEnv(gym.Env):
         # Final reward calculation
         final_reward = base_reward + positive_bonus - total_penalty
         
-        # === SEGMENT-BASED CAPPING ===
+        # === SEGMENT-BASED CAPPING === - using configurable parameters
         # Cap final reward in different segments for stable learning
         if final_reward > 0:
-            final_reward = min(final_reward, 15.0)  # Cap positive rewards
+            final_reward = min(final_reward, self.reward_config['final_reward_positive_cap'])  # Cap positive rewards
         else:
-            final_reward = max(final_reward, -25.0)  # Cap negative rewards
+            final_reward = max(final_reward, self.reward_config['final_reward_negative_cap'])  # Cap negative rewards
         
         # Additional severe loss capping
-        if equity_ratio <= 0.10:  # Very low equity
-            final_reward = max(final_reward, -50.0)  # Allow larger negative rewards for severe losses
+        if equity_ratio <= self.reward_config['severe_equity_threshold']:  # Very low equity (configurable)
+            final_reward = max(final_reward, self.reward_config['severe_loss_reward_cap'])  # Allow larger negative rewards for severe losses
         
         return float(final_reward)
     
@@ -1497,16 +1633,93 @@ class FuturesTradingEnv(gym.Env):
         
         return environments
     
-    def _update_stop_loss_take_profit(self, current_price: float):
-        """Update stop-loss and take-profit prices for current position"""
-        if abs(self.position_size) < 0.001:
-            self.stop_loss_price = None
-            self.take_profit_price = None
-            return
+    def _setup_reward_config(self, reward_config: Optional[Dict[str, float]] = None) -> None:
+        """
+        Setup reward configuration with default values or user-provided overrides.
         
-        if self.position_side == 1:  # Long
-            self.stop_loss_price = current_price * (1 - self.stop_loss_pct)
-            self.take_profit_price = current_price * (1 + self.take_profit_pct)
-        else:  # Short
-            self.stop_loss_price = current_price * (1 + self.stop_loss_pct)
-            self.take_profit_price = current_price * (1 - self.take_profit_pct)
+        Args:
+            reward_config: Optional dictionary of reward parameters to override defaults
+        """
+        # Default reward configuration - all the "magic numbers" made configurable
+        default_config = {
+            # Base reward scaling
+            'base_reward_scale': 100,
+            'base_reward_cap_positive': 10.0,
+            'base_reward_cap_negative': -10.0,
+            
+            # Drawdown penalties
+            'severe_drawdown_threshold': 0.5,  # 50%
+            'severe_drawdown_penalty': 20.0,
+            'major_drawdown_threshold': 0.3,   # 30%
+            'major_drawdown_penalty': 10.0,
+            'moderate_drawdown_threshold': 0.1, # 10%
+            'moderate_drawdown_penalty': 5.0,
+            'linear_drawdown_multiplier': 25,
+            
+            # Balance ratio penalties
+            'critical_equity_threshold': 0.05,  # 5%
+            'critical_equity_penalty': 50.0,
+            'severe_equity_threshold': 0.10,   # 10%
+            'severe_equity_penalty': 30.0,
+            'major_equity_threshold': 0.20,    # 20%
+            'major_equity_penalty': 20.0,
+            'moderate_equity_threshold': 0.30, # 30%
+            'moderate_equity_penalty': 10.0,
+            'minor_equity_threshold': 0.50,    # 50%
+            'minor_equity_penalty': 5.0,
+            
+            # Consecutive loss penalties
+            'consecutive_loss_exponent': 1.5,
+            'consecutive_loss_cap': 15.0,
+            
+            # Trend penalties
+            'trend_penalty_multiplier': 1000,
+            'trend_penalty_cap': 8.0,
+            
+            # Volatility penalties
+            'volatility_multiplier': 15,
+            'volatility_penalty_cap': 5.0,
+            'volatility_history_threshold': 10,
+            
+            # Trading cost penalties
+            'cost_penalty_multiplier': 500,
+            'cost_penalty_cap': 2.0,
+            
+            # Special penalties
+            'liquidation_penalty': 25.0,
+            'excessive_leverage_threshold': 20,
+            'excessive_leverage_multiplier': 0.5,
+            
+            # Positive bonuses
+            'position_hold_bonus': 0.5,
+            'position_hold_penalty': 0.3,
+            'optimal_hold_min': 4,
+            'optimal_hold_max': 24,
+            'excessive_hold_threshold': 24,
+            'consecutive_wins_multiplier': 0.2,
+            'consecutive_wins_cap': 2.0,
+            'recovery_threshold': 0.05,        # 5%
+            'recovery_multiplier': 20,
+            'recovery_bonus_cap': 3.0,
+            
+            # Final reward caps
+            'final_reward_positive_cap': 15.0,
+            'final_reward_negative_cap': -25.0,
+            'severe_loss_reward_cap': -50.0,
+        }
+        
+        # Start with defaults
+        self.reward_config = default_config.copy()
+        
+        # Override with user-provided values if any
+        if reward_config:
+            for key, value in reward_config.items():
+                if key in self.reward_config:
+                    self.reward_config[key] = float(value)
+                else:
+                    print(f"Warning: Unknown reward config parameter '{key}' ignored")
+        
+        # Log the configuration being used
+        print(f"Reward configuration loaded with {len(self.reward_config)} parameters")
+        if reward_config:
+            print(f"User overrides applied: {list(reward_config.keys())}")
