@@ -33,6 +33,7 @@ from stable_baselines3.common.logger import configure
 # Local imports
 from trading_environment import FuturesTradingEnv
 from model_architectures import CNNLSTMFeatureExtractor, AttentionCNNLSTMExtractor, ResNetLSTMExtractor
+from action_space_wrapper import DictToBoxActionWrapper, wrap_environment_for_algorithm
 
 console = Console()
 
@@ -389,7 +390,7 @@ def load_data(file_path: str) -> pd.DataFrame:
 
 def create_environment(df: pd.DataFrame, params: Dict[str, Any], log_file: str = None, training_iteration: int = 0):
     """Create trading environment with specified parameters"""
-    return FuturesTradingEnv(
+    env = FuturesTradingEnv(
         df=df,
         initial_equity=params['initial_equity'],
         max_leverage=params['max_leverage'],
@@ -402,6 +403,10 @@ def create_environment(df: pd.DataFrame, params: Dict[str, Any], log_file: str =
         training_iteration=training_iteration,
         use_advanced_action_space=True  # Enable advanced action space by default
     )
+    
+    # Wrap environment for PPO compatibility (Dict → Box conversion)
+    wrapped_env = wrap_environment_for_algorithm(env, "PPO")
+    return wrapped_env
 
 def save_config(config: Dict[str, Any], filename: str):
     """Save training configuration"""
