@@ -21,6 +21,7 @@ from rich import print as rprint
 from stable_baselines3 import PPO, A2C, SAC
 from trading_environment import FuturesTradingEnv, TradingMetrics
 from model_architectures import CNNLSTMFeatureExtractor, AttentionCNNLSTMExtractor, ResNetLSTMExtractor
+from action_space_wrapper import wrap_environment_for_algorithm
 
 console = Console()
 
@@ -72,6 +73,9 @@ class TradingBacktester:
             use_advanced_action_space=True,  # Enable advanced action space by default
             **self.config["training_params"]
         )
+        
+        # Wrap environment for model compatibility
+        self.env = wrap_environment_for_algorithm(self.env, "PPO")
         
         # Load model
         console.print(f"🤖 Loading model from: [green]{self.model_path}[/green]")
