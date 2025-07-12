@@ -150,6 +150,12 @@ data/historical/
 data/live/
 data/coinapi/
 
+# DataDownload module data files
+DataDownload/data/
+DataDownload/**/*.csv
+DataDownload/**/*.parquet
+DataDownload/**/*.feather
+
 # Model files and training artifacts
 models/*.pth
 models/*.pkl
