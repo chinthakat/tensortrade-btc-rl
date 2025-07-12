@@ -208,6 +208,7 @@ class MultiEpisodeTrainer:
                 df=train_data,
                 log_file=log_file,
                 training_iteration=episode_num,
+                use_advanced_action_space=True,  # Enable advanced action space by default
                 **self.base_config["training_params"]
             )
         
