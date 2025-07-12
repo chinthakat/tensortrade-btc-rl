@@ -147,7 +147,9 @@ class FuturesTradingEnv(gym.Env):
         training_end_idx: Optional[int] = None,  # Explicit training end index for scaling
         # Liquidation parameters (based on Binance Futures)
         maintenance_margin_rate: float = 0.004,  # 0.4% for most symbols at moderate leverage
-        liquidation_fee_rate: float = 0.005  # 0.5% liquidation fee
+        liquidation_fee_rate: float = 0.005,  # 0.5% liquidation fee
+        # Enhanced action space control
+        use_advanced_action_space: bool = False  # Toggle between simple and advanced action space
     ):
         super().__init__()
         
@@ -168,6 +170,9 @@ class FuturesTradingEnv(gym.Env):
         self.maintenance_margin_rate = maintenance_margin_rate
         self.liquidation_fee_rate = liquidation_fee_rate
         
+        # Enhanced action space control
+        self.use_advanced_action_space = use_advanced_action_space
+        
         # Initialize logger
         if log_file:
             self.logger = TradeLogger(log_file)
@@ -180,13 +185,31 @@ class FuturesTradingEnv(gym.Env):
         # Trading state
         self.reset()
         
-        # Define action space: continuous leverage from -max_leverage to +max_leverage
-        self.action_space = spaces.Box(
-            low=-self.max_leverage, 
-            high=self.max_leverage, 
-            shape=(1,), 
-            dtype=np.float32
-        )
+        # Define action space based on configuration
+        if self.use_advanced_action_space:
+            # Phase 1: Advanced Dict action space (leverage + risk percentage)
+            self.action_space = spaces.Dict({
+                'leverage': spaces.Box(
+                    low=-self.max_leverage, 
+                    high=self.max_leverage, 
+                    shape=(1,), 
+                    dtype=np.float32
+                ),
+                'risk_percentage': spaces.Box(
+                    low=0.01,  # Minimum 1% of equity at risk
+                    high=1.0,  # Maximum 100% of equity at risk
+                    shape=(1,), 
+                    dtype=np.float32
+                )
+            })
+        else:
+            # Legacy simple action space: continuous leverage only
+            self.action_space = spaces.Box(
+                low=-self.max_leverage, 
+                high=self.max_leverage, 
+                shape=(1,), 
+                dtype=np.float32
+            )
         
         # Define observation space with enhanced portfolio features
         n_features = self.feature_columns.shape[1]
@@ -391,10 +414,22 @@ class FuturesTradingEnv(gym.Env):
         
         return observation, info
     
-    def step(self, action: np.ndarray) -> Tuple[Dict, float, bool, bool, Dict]:
+    def step(self, action) -> Tuple[Dict, float, bool, bool, Dict]:
         """Execute one step in the environment"""
-        action = action[0]  # Extract scalar from array
-        action = np.clip(action, -self.max_leverage, self.max_leverage)
+        # Parse action based on action space type
+        if self.use_advanced_action_space:
+            # Advanced action space: Dict with leverage and risk_percentage
+            leverage = action['leverage'][0] if isinstance(action['leverage'], np.ndarray) else action['leverage']
+            risk_percentage = action['risk_percentage'][0] if isinstance(action['risk_percentage'], np.ndarray) else action['risk_percentage']
+            
+            # Clip values to valid ranges
+            leverage = np.clip(leverage, -self.max_leverage, self.max_leverage)
+            risk_percentage = np.clip(risk_percentage, 0.01, 1.0)
+        else:
+            # Legacy action space: single leverage value
+            leverage = action[0] if isinstance(action, np.ndarray) else action
+            leverage = np.clip(leverage, -self.max_leverage, self.max_leverage)
+            risk_percentage = 1.0  # Use full equity (legacy behavior)
         
         # Store previous state
         prev_equity = self.equity
@@ -424,7 +459,7 @@ class FuturesTradingEnv(gym.Env):
         
         # Execute new action if not liquidated
         if not liquidation_triggered and not sl_tp_triggered:
-            self._execute_action(action, current_price)
+            self._execute_action(leverage, risk_percentage, current_price)
         
         # Update tracking
         self.equity_history.append(self.equity)
@@ -475,9 +510,11 @@ class FuturesTradingEnv(gym.Env):
         
         return observation, reward, terminated, truncated, info
     
-    def _execute_action(self, target_leverage: float, current_price: float):
-        """Execute trading action based on target leverage"""
-        target_position_value = target_leverage * self.equity
+    def _execute_action(self, target_leverage: float, risk_percentage: float, current_price: float):
+        """Execute trading action based on target leverage and risk percentage"""
+        # Calculate position size based on risk percentage and leverage
+        risk_equity = self.equity * risk_percentage  # Amount of equity to risk
+        target_position_value = target_leverage * risk_equity
         target_position_size = target_position_value / current_price if current_price > 0 else 0
         
         # Calculate trade size needed
