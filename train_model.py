@@ -399,7 +399,8 @@ def create_environment(df: pd.DataFrame, params: Dict[str, Any], log_file: str =
         maintenance_margin_rate=params['maintenance_margin_rate'],
         liquidation_fee_rate=params['liquidation_fee_rate'],
         log_file=log_file,
-        training_iteration=training_iteration
+        training_iteration=training_iteration,
+        use_advanced_action_space=True  # Enable advanced action space by default
     )
 
 def save_config(config: Dict[str, Any], filename: str):

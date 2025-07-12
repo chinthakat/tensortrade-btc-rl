@@ -69,6 +69,7 @@ class TradingBacktester:
         self.env = FuturesTradingEnv(
             df=df,
             log_file=log_file,
+            use_advanced_action_space=True,  # Enable advanced action space by default
             **self.config["training_params"]
         )
         
