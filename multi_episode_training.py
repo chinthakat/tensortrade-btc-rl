@@ -26,6 +26,7 @@ from stable_baselines3.common.monitor import Monitor
 from trading_environment import FuturesTradingEnv
 from model_architectures import CNNLSTMFeatureExtractor, AttentionCNNLSTMExtractor, ResNetLSTMExtractor
 from backtest import TradingBacktester
+from action_space_wrapper import wrap_environment_for_algorithm
 
 console = Console()
 
@@ -204,13 +205,15 @@ class MultiEpisodeTrainer:
         
         # Create environment function
         def env_fn():
-            return FuturesTradingEnv(
+            env = FuturesTradingEnv(
                 df=train_data,
                 log_file=log_file,
                 training_iteration=episode_num,
                 use_advanced_action_space=True,  # Enable advanced action space by default
                 **self.base_config["training_params"]
             )
+            # Wrap environment for PPO compatibility
+            return wrap_environment_for_algorithm(env, "PPO")
         
         # Setup vectorized environment
         vec_env = make_vec_env(env_fn, n_envs=self.base_config["training_params"].get("n_envs", 4))
