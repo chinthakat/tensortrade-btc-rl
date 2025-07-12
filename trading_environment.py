@@ -484,61 +484,133 @@ class FuturesTradingEnv(gym.Env):
         trade_size = target_position_size - self.position_size
         
         if abs(trade_size) > 0.001:  # Only trade if significant change
-            # Close existing position if changing direction
-            if self.position_size != 0 and np.sign(target_position_size) != np.sign(self.position_size):
-                self._close_position(current_price, "DIRECTION_CHANGE")
-            
-            # Open new position or adjust existing
-            if abs(target_position_size) > 0.001:
-                self._open_or_adjust_position(target_position_size, current_price)
+            # Efficient trade execution - single order instead of close + open
+            self._execute_efficient_trade(target_position_size, current_price)
     
-    def _open_or_adjust_position(self, target_position_size: float, current_price: float):
-        """Open new position or adjust existing position"""
-        # Calculate trade details
-        trade_value = abs(target_position_size * current_price)
-        fee = trade_value * self.taker_fee
+    def _execute_efficient_trade(self, target_position_size: float, current_price: float):
+        """
+        Execute trade efficiently by calculating net position change.
+        This simulates real exchange behavior where position flips are handled as single orders.
+        """
+        trade_size = target_position_size - self.position_size
         
-        # Check if we have enough equity
-        required_margin = trade_value / self.max_leverage
+        if abs(trade_size) < 0.001:
+            return  # No significant trade needed
         
-        # Debug logging
-        logging.debug(f"Opening position: target_size={target_position_size:.6f}, price=${current_price:.2f}")
-        logging.debug(f"Trade value: ${trade_value:.2f}, Fee: ${fee:.2f}, Required margin: ${required_margin:.2f}")
-        logging.debug(f"Current equity: ${self.equity:.2f}")
+        # Calculate realized PnL if we have an existing position being modified
+        realized_pnl = 0.0
         
-        if required_margin + fee > self.equity:
-            logging.warning(f"Insufficient equity: need ${required_margin + fee:.2f}, have ${self.equity:.2f}")
-            return  # Not enough equity
-        
-        # Close existing position if any
         if self.position_size != 0:
-            self._close_position(current_price, "ADJUSTMENT")
+            # We're modifying an existing position
+            if np.sign(target_position_size) != np.sign(self.position_size):
+                # Position flip: calculate PnL on the closed portion
+                if self.position_side == 1:  # Closing long
+                    realized_pnl = self.position_size * (current_price - self.entry_price)
+                else:  # Closing short
+                    realized_pnl = self.position_size * (self.entry_price - current_price)
+                
+                # Update realized PnL tracking
+                self.total_realized_pnl += realized_pnl
+                self.last_trade_pnl = realized_pnl
+                
+                # Update consecutive tracking
+                if realized_pnl > 0:
+                    self.consecutive_wins += 1
+                    self.consecutive_losses = 0
+                else:
+                    self.consecutive_losses += 1
+                    self.consecutive_wins = 0
+            
+            elif abs(self.position_size) > abs(target_position_size):
+                # Partial close: calculate PnL on the reduced portion
+                position_reduction = self.position_size - target_position_size
+                if self.position_side == 1:  # Reducing long
+                    realized_pnl = position_reduction * (current_price - self.entry_price)
+                else:  # Reducing short
+                    realized_pnl = position_reduction * (self.entry_price - current_price)
+                
+                self.total_realized_pnl += realized_pnl
+                self.last_trade_pnl = realized_pnl
         
-        # Open new position
+        # Calculate trading fees on the net trade volume (efficient!)
+        trade_value = abs(trade_size * current_price)
+        trading_fee = trade_value * self.taker_fee
+        
+        # Update balance with realized PnL and fees
+        self.balance += realized_pnl - trading_fee
+        self.total_fees += trading_fee
+        
+        # Update position
+        old_position_size = self.position_size
         self.position_size = target_position_size
-        self.position_side = 1 if target_position_size > 0 else -1
-        self.entry_price = current_price
-        self.leverage = abs(target_position_size * current_price / self.equity)
-        self.margin_used = trade_value / self.leverage if self.leverage > 0 else 0
         
-        # Deduct fees
-        self.balance -= fee
-        self.total_fees += fee
+        if abs(self.position_size) > 0.001:
+            # We have a position
+            self.position_side = 1 if self.position_size > 0 else -1
+            
+            # Update entry price for new or flipped positions
+            if old_position_size == 0 or np.sign(old_position_size) != np.sign(self.position_size):
+                # New position or position flip
+                self.entry_price = current_price
+                self.trade_id += 1
+                self.trade_start_step = self.current_step
+                self.entry_equity = self.equity
+            
+            # Update margin and risk management
+            self.margin_used = abs(self.position_size * current_price) / self.leverage if self.leverage > 0 else 0
+            self._calculate_liquidation_price()
+            self._update_stop_loss_take_profit(current_price)
+        else:
+            # No position
+            self.position_side = 0
+            self.entry_price = 0.0
+            self.margin_used = 0.0
+            self.liquidation_price = None
+            self.stop_loss_price = None
+            self.take_profit_price = None
         
-        # Set stop loss and take profit
+        # Log the efficient trade
+        if hasattr(self, 'trade_logger') and self.trade_logger:
+            action_type = "FLIP" if old_position_size != 0 and np.sign(old_position_size) != np.sign(self.position_size) else "ADJUST"
+            if old_position_size == 0:
+                action_type = "OPEN"
+            elif abs(self.position_size) < 0.001:
+                action_type = "CLOSE"
+            
+            self.trade_logger.log_trade(
+                step=self.current_step,
+                action=action_type,
+                price=current_price,
+                position_size=self.position_size,
+                pnl=realized_pnl,
+                fee=trading_fee,
+                balance=self.balance,
+                leverage=abs(self.position_size * current_price) / self.equity if self.equity > 0 else 0
+            )
+    
+    def _update_stop_loss_take_profit(self, current_price: float):
+        """Update stop-loss and take-profit prices for current position"""
+        if abs(self.position_size) < 0.001:
+            self.stop_loss_price = None
+            self.take_profit_price = None
+            return
+        
         if self.position_side == 1:  # Long
             self.stop_loss_price = current_price * (1 - self.stop_loss_pct)
             self.take_profit_price = current_price * (1 + self.take_profit_pct)
         else:  # Short
             self.stop_loss_price = current_price * (1 + self.stop_loss_pct)
             self.take_profit_price = current_price * (1 - self.take_profit_pct)
+    
+    def _open_or_adjust_position(self, target_position_size: float, current_price: float):
+        """
+        DEPRECATED: This method is kept for compatibility but is inefficient.
+        Use _execute_efficient_trade instead for normal position changes.
+        """
+        logging.warning("Using deprecated _open_or_adjust_position. Consider using _execute_efficient_trade instead.")
         
-        # Calculate realistic liquidation price based on maintenance margin
-        self.liquidation_price = self._calculate_liquidation_price()
-        
-        # Track trade start
-        self.trade_start_step = self.current_step
-        self.entry_equity = self.equity
+        # For compatibility, just call the efficient method
+        self._execute_efficient_trade(target_position_size, current_price)
     
     def _close_position(self, current_price: float, reason: str):
         """Close current position"""
@@ -837,7 +909,6 @@ class FuturesTradingEnv(gym.Env):
             self.leverage = 0.0
             self.stop_loss_price = None
             self.take_profit_price = None
-            self.liquidation_price = None
             
             # Update episode stats
             self.episode_trades += 1
@@ -854,17 +925,17 @@ class FuturesTradingEnv(gym.Env):
         
         if self.position_side == 1:  # Long position
             if current_low <= self.stop_loss_price:
-                self._close_position(self.stop_loss_price, "STOP_LOSS")
+                self._execute_efficient_trade(0.0, self.stop_loss_price)  # Close to zero position
                 return True
             elif current_high >= self.take_profit_price:
-                self._close_position(self.take_profit_price, "TAKE_PROFIT")
+                self._execute_efficient_trade(0.0, self.take_profit_price)  # Close to zero position
                 return True
         else:  # Short position
             if current_high >= self.stop_loss_price:
-                self._close_position(self.stop_loss_price, "STOP_LOSS")
+                self._execute_efficient_trade(0.0, self.stop_loss_price)  # Close to zero position
                 return True
             elif current_low <= self.take_profit_price:
-                self._close_position(self.take_profit_price, "TAKE_PROFIT")
+                self._execute_efficient_trade(0.0, self.take_profit_price)  # Close to zero position
                 return True
         
         return False
@@ -1388,3 +1459,17 @@ class FuturesTradingEnv(gym.Env):
         logging.info(f"  Step size: {step_size} samples")
         
         return environments
+    
+    def _update_stop_loss_take_profit(self, current_price: float):
+        """Update stop-loss and take-profit prices for current position"""
+        if abs(self.position_size) < 0.001:
+            self.stop_loss_price = None
+            self.take_profit_price = None
+            return
+        
+        if self.position_side == 1:  # Long
+            self.stop_loss_price = current_price * (1 - self.stop_loss_pct)
+            self.take_profit_price = current_price * (1 + self.take_profit_pct)
+        else:  # Short
+            self.stop_loss_price = current_price * (1 + self.stop_loss_pct)
+            self.take_profit_price = current_price * (1 - self.take_profit_pct)
