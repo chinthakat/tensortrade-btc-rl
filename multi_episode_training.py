@@ -32,6 +32,21 @@ from action_space_wrapper import wrap_environment_for_algorithm
 
 console = Console()
 
+class NumpyEncoder(json.JSONEncoder):
+    """Custom JSON encoder for NumPy types"""
+    def default(self, obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, pd.Timestamp):
+            return obj.isoformat()
+        elif pd.isna(obj):
+            return None
+        return super().default(obj)
+
 def timeout_confirmation(prompt: str, timeout_seconds: int = 60, default: bool = True) -> bool:
     """
     Ask for confirmation with automatic timeout (Windows-compatible).
@@ -135,7 +150,7 @@ class EpisodeTracker:
         }
         
         with open(tracking_file, 'w') as f:
-            json.dump(data, f, indent=2)
+            json.dump(data, f, indent=2, cls=NumpyEncoder)
     
     def get_best_episode(self) -> Optional[Dict]:
         """Get the best performing episode"""
@@ -193,9 +208,10 @@ class EpisodeTracker:
 class MultiEpisodeTrainer:
     """Multi-episode training system with model persistence"""
     
-    def __init__(self, data_path: str, base_config: Dict):
+    def __init__(self, data_path: str, base_config: Dict, starting_model_path: Optional[str] = None):
         self.data_path = data_path
         self.base_config = base_config
+        self.starting_model_path = starting_model_path
         self.episode_tracker = EpisodeTracker()
         
         # Load data
@@ -207,8 +223,12 @@ class MultiEpisodeTrainer:
         
         # Training state
         self.current_episode = 0
-        self.best_model_path = None
+        self.best_model_path = starting_model_path  # Initialize with starting model
         self.best_performance = None
+        
+        # If we have a starting model, it's considered our current best
+        if starting_model_path:
+            console.print(f"🎯 Starting from model: {starting_model_path}")
     
     def _create_data_splits(self, min_train_size: int = 10000, validation_size: int = 2000) -> List[Tuple[pd.DataFrame, pd.DataFrame]]:
         """Create walk-forward data splits for episodes"""
@@ -306,14 +326,24 @@ class MultiEpisodeTrainer:
         
         # Load existing model or create new one
         model_class = algorithm_classes[algorithm]
+        model_to_load = None
         
-        if continue_from_best and self.best_model_path and os.path.exists(self.best_model_path):
-            console.print(f"🔄 Continuing from best model: {self.best_model_path}")
+        # Determine which model to load
+        if continue_from_best and self.best_model_path:
+            if os.path.exists(self.best_model_path):
+                model_to_load = self.best_model_path
+                console.print(f"🔄 Continuing from best model: {self.best_model_path}")
+            else:
+                console.print(f"[yellow]⚠️  Best model path not found: {self.best_model_path}[/yellow]")
+        
+        # Try to load the selected model
+        if model_to_load:
             try:
-                model = model_class.load(self.best_model_path, env=vec_env)
+                model = model_class.load(model_to_load, env=vec_env)
                 model.tensorboard_log = f"{episode_dir}/tensorboard/"
+                console.print(f"✅ Successfully loaded model from: {model_to_load}")
             except Exception as e:
-                console.print(f"[yellow]⚠️  Could not load existing model: {str(e)}[/yellow]")
+                console.print(f"[yellow]⚠️  Could not load model: {str(e)}[/yellow]")
                 console.print("Creating new model instead...")
                 model = model_class(
                     "MultiInputPolicy",
@@ -504,12 +534,19 @@ class MultiEpisodeTrainer:
         console.print(f"⚡ Algorithm: {algorithm}")
         console.print(f"🎯 Timesteps per episode: {timesteps_per_episode:,}")
         
+        if self.starting_model_path:
+            console.print(f"🏁 Starting from: {Path(self.starting_model_path).name}")
+        
         # Display existing episode history
         self.episode_tracker.display_episode_summary()
         
         try:
             for episode_num in range(num_episodes):
                 train_data, val_data = self.data_splits[episode_num]
+                
+                # For the first episode, use starting model if available
+                # For subsequent episodes, continue from best
+                continue_from_best = episode_num > 0 or self.starting_model_path is not None
                 
                 # Train episode
                 model_path = self.train_episode(
@@ -519,7 +556,7 @@ class MultiEpisodeTrainer:
                     model_architecture=model_architecture,
                     algorithm=algorithm,
                     timesteps=timesteps_per_episode,
-                    continue_from_best=True
+                    continue_from_best=continue_from_best
                 )
                 
                 if model_path is None:
@@ -545,6 +582,46 @@ class MultiEpisodeTrainer:
         if self.best_model_path:
             console.print(f"\n🏆 [bold green]Best model: {self.best_model_path}[/bold green]")
             console.print(f"📈 Best return: {self.best_performance['total_return_pct']:.2f}%")
+
+def get_existing_models():
+    """Find all existing trained models"""
+    models = {}
+    
+    # Search in episodes directory
+    episodes_dir = Path("episodes")
+    if episodes_dir.exists():
+        for episode_dir in episodes_dir.iterdir():
+            if episode_dir.is_dir():
+                models_dir = episode_dir / "models"
+                if models_dir.exists():
+                    for model_file in models_dir.glob("*.zip"):
+                        if model_file.name.startswith(("final_", "best_", "checkpoint_")):
+                            # Use relative path from episodes directory
+                            rel_path = str(model_file.relative_to(episodes_dir.parent))
+                            model_info = {
+                                'path': str(model_file.absolute()),
+                                'name': model_file.name,
+                                'episode': episode_dir.name,
+                                'size_mb': model_file.stat().st_size / 1024 / 1024,
+                                'modified': datetime.fromtimestamp(model_file.stat().st_mtime)
+                            }
+                            models[rel_path] = model_info
+    
+    # Search in models directory
+    models_dir = Path("models")
+    if models_dir.exists():
+        for model_file in models_dir.glob("*.zip"):
+            rel_path = str(model_file.relative_to(models_dir.parent))
+            model_info = {
+                'path': str(model_file.absolute()),
+                'name': model_file.name,
+                'episode': 'models',
+                'size_mb': model_file.stat().st_size / 1024 / 1024,
+                'modified': datetime.fromtimestamp(model_file.stat().st_mtime)
+            }
+            models[rel_path] = model_info
+    
+    return models
 
 def setup_multi_episode_training():
     """Setup and run multi-episode training"""
@@ -580,6 +657,61 @@ def setup_multi_episode_training():
     else:
         console.print("[red]Invalid selection[/red]")
         return
+    
+    # Model selection - existing or new
+    console.print("\n[bold]🤖 Model Selection[/bold]")
+    existing_models = get_existing_models()
+    
+    if existing_models:
+        console.print("\n[cyan]Found existing models:[/cyan]")
+        
+        # Display existing models
+        model_table = Table(title="Available Models")
+        model_table.add_column("Index", style="cyan", no_wrap=True)
+        model_table.add_column("Model Name", style="green")
+        model_table.add_column("Episode/Location", style="yellow")
+        model_table.add_column("Size (MB)", style="blue")
+        model_table.add_column("Modified", style="magenta")
+        
+        model_list = list(existing_models.items())
+        
+        # Add "Create New Model" option
+        model_table.add_row("0", "[bold]🆕 Create New Model[/bold]", "New Training", "-", "-")
+        
+        for i, (rel_path, info) in enumerate(model_list):
+            model_table.add_row(
+                str(i+1),
+                info['name'],
+                info['episode'],
+                f"{info['size_mb']:.1f}",
+                info['modified'].strftime("%Y-%m-%d %H:%M")
+            )
+        
+        console.print(model_table)
+        
+        model_choice = IntPrompt.ask(
+            "Select model (0 = new, 1+ = existing)", 
+            default=0
+        )
+        
+        if model_choice == 0:
+            # Create new model
+            starting_model_path = None
+            console.print("[green]✅ Creating new model from scratch[/green]")
+        elif 1 <= model_choice <= len(model_list):
+            # Use existing model
+            selected_model = model_list[model_choice-1][1]
+            starting_model_path = selected_model['path']
+            console.print(f"[green]✅ Using existing model:[/green]")
+            console.print(f"   📁 Path: {selected_model['path']}")
+            console.print(f"   📦 Size: {selected_model['size_mb']:.1f} MB")
+            console.print(f"   📅 Modified: {selected_model['modified'].strftime('%Y-%m-%d %H:%M')}")
+        else:
+            console.print("[red]Invalid model selection[/red]")
+            return
+    else:
+        console.print("[yellow]No existing models found. Creating new model.[/yellow]")
+        starting_model_path = None
     
     # Training configuration
     num_episodes = IntPrompt.ask("Number of episodes to train", default=5)
@@ -624,7 +756,7 @@ def setup_multi_episode_training():
     }
     
     # Create and run trainer
-    trainer = MultiEpisodeTrainer(data_path, base_config)
+    trainer = MultiEpisodeTrainer(data_path, base_config, starting_model_path=starting_model_path)
     trainer.run_multi_episode_training(
         num_episodes=num_episodes,
         model_architecture=model_architecture,

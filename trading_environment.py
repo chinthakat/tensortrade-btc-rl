@@ -777,6 +777,9 @@ class FuturesTradingEnv(gym.Env):
         if abs(trade_size) < 0.001:
             return  # No significant trade needed
         
+        # Count ANY significant trade execution (BUY/SELL action)
+        self.episode_trades += 1
+        
         # Calculate realized PnL if we have an existing position being modified
         realized_pnl = 0.0
         
@@ -1064,7 +1067,7 @@ class FuturesTradingEnv(gym.Env):
         self.liquidation_price = None
         
         # Update episode stats
-        self.episode_trades += 1
+        # Note: episode_trades is now counted in _execute_efficient_trade
         self.episode_profit += pnl
     
     def _log_trade(self, exit_price: float, pnl: float, reason: str):
@@ -1305,7 +1308,7 @@ class FuturesTradingEnv(gym.Env):
             self.take_profit_price = None
             
             # Update episode stats
-            self.episode_trades += 1
+            # Note: episode_trades is now counted in _execute_efficient_trade
             self.episode_profit += pnl
             
             return True
