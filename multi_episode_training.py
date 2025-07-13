@@ -143,6 +143,7 @@ class EpisodeTracker:
     
     def _save_data(self):
         """Save tracking data to file"""
+    
         tracking_file = os.path.join(self.save_path, "episode_tracking.json")
         data = {
             'episodes': self.episodes,
@@ -582,6 +583,52 @@ class MultiEpisodeTrainer:
         if self.best_model_path:
             console.print(f"\n🏆 [bold green]Best model: {self.best_model_path}[/bold green]")
             console.print(f"📈 Best return: {self.best_performance['total_return_pct']:.2f}%")
+            
+            # Save the best model to the general models folder
+            self._save_best_model_to_general_folder()
+    
+    def _save_best_model_to_general_folder(self):
+        """Save the best model from multi-episode training to the general models folder"""
+        if not self.best_model_path or not os.path.exists(self.best_model_path):
+            console.print("[yellow]⚠️  No best model found to save to general folder[/yellow]")
+            return
+        
+        try:
+            import shutil
+            from pathlib import Path
+            
+            # Create models directory if it doesn't exist
+            models_dir = Path("models")
+            models_dir.mkdir(exist_ok=True)
+            
+            # Generate filename for the best model
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            original_filename = Path(self.best_model_path).name
+            
+            # Extract useful info from the original path for naming
+            if "episode_" in self.best_model_path:
+                episode_info = self.best_model_path.split("episode_")[1].split("/")[0]
+            else:
+                episode_info = "multi_episode"
+            
+            # Create descriptive filename
+            new_filename = f"best_multi_episode_{episode_info}_{timestamp}.zip"
+            destination_path = models_dir / new_filename
+            
+            # Copy the best model to general models folder
+            shutil.copy2(self.best_model_path, destination_path)
+            
+            console.print(f"\n[bold green]✅ Best model saved to general models folder![/bold green]")
+            console.print(f"📁 Saved as: [green]{new_filename}[/green]")
+            console.print(f"📊 Model performance: {self.best_performance['total_return_pct']:.2f}% return")
+            
+            # Also update the best_model.zip (traditional location)
+            best_model_path = models_dir / "best_model.zip"
+            shutil.copy2(self.best_model_path, best_model_path)
+            console.print(f"🔄 Also updated: [green]best_model.zip[/green]")
+            
+        except Exception as e:
+            console.print(f"[red]❌ Error saving best model to general folder: {str(e)}[/red]")
 
 def get_existing_models():
     """Find all existing trained models"""
