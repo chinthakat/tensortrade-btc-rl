@@ -536,7 +536,7 @@ class FuturesTradingEnv(gym.Env):
                     'trade_id': f"ACTION_STATS_{self.current_step}",
                     'training_step': self.current_step,
                     'training_iteration': getattr(self, 'training_iteration', 0),
-                    'entry_datetime': self.df.iloc[self.current_step]['timestamp'] if self.current_step < len(self.df) else f"step_{self.current_step}",
+                    'entry_datetime': self._safe_get_df_data(self.current_step, 'timestamp', f"step_{self.current_step}"),
                     'close_datetime': '',
                     'side': f"HOLD:{self.action_type_counts['HOLD']}/{total_actions}",
                     'entry_action': f"BUY:{self.action_type_counts['BUY']} SELL:{self.action_type_counts['SELL']} CANCEL:{self.action_type_counts['CANCEL']}",
@@ -568,10 +568,10 @@ class FuturesTradingEnv(gym.Env):
         # Store previous state
         prev_equity = self.equity
         
-        # Get current price
-        current_price = self.price_data.iloc[self.current_step]['close']
-        current_high = self.price_data.iloc[self.current_step]['high']
-        current_low = self.price_data.iloc[self.current_step]['low']
+        # Get current price safely
+        current_price = self._safe_get_price_data(self.current_step, 'close', 0.0)
+        current_high = self._safe_get_price_data(self.current_step, 'high', current_price)
+        current_low = self._safe_get_price_data(self.current_step, 'low', current_price)
         
         # Update unrealized PnL
         if self.position_size != 0:
@@ -639,19 +639,45 @@ class FuturesTradingEnv(gym.Env):
         # Calculate reward with enhanced risk management
         reward = self._calculate_enhanced_reward(prev_equity)
         
-        # Check terminal conditions
-        terminated = self.equity <= 0 or self.liquidated or terminated_early
-        truncated = self.current_step >= len(self.price_data) - 1
-        
         # Move to next step
         self.current_step += 1
         
-        # Get next observation
-        observation = self._get_observation()
+        # Check terminal conditions (after step increment)
+        terminated = self.equity <= 0 or self.liquidated or terminated_early
+        truncated = self.current_step >= len(self.price_data)
+        
+        # Get next observation only if not terminated/truncated
+        if not (terminated or truncated):
+            observation = self._get_observation()
+        else:
+            # Return a dummy observation for terminal states
+            observation = {
+                'market_features': np.zeros((self.window_size, len(self.feature_columns.columns)), dtype=np.float32),
+                'portfolio_features': np.zeros(12, dtype=np.float32)
+            }
+        
         info = self._get_info()
         
         return observation, reward, terminated, truncated, info
     
+    def _safe_get_price_data(self, step: int, column: str, default_value: float = 0.0):
+        """Safely get price data at a specific step"""
+        if step < 0 or step >= len(self.price_data):
+            return default_value
+        return self.price_data.iloc[step][column]
+    
+    def _safe_get_feature_data(self, step: int, column: str, default_value: float = 0.0):
+        """Safely get feature data at a specific step"""
+        if step < 0 or step >= len(self.feature_columns):
+            return default_value
+        return self.feature_columns.iloc[step][column]
+    
+    def _safe_get_df_data(self, step: int, column: str, default_value=None):
+        """Safely get dataframe data at a specific step"""
+        if step < 0 or step >= len(self.df):
+            return default_value or f"step_{step}"
+        return self.df.iloc[step][column]
+
     def _execute_action(self, target_leverage: float, risk_percentage: float, current_price: float):
         """Execute trading action based on target leverage and risk percentage"""
         # Enhanced risk controls
@@ -891,16 +917,21 @@ class FuturesTradingEnv(gym.Env):
         """Get current ATR value from the feature data (before scaling)"""
         try:
             # ATR is in the original feature columns, not price_data
-            current_atr = self.feature_columns.iloc[self.current_step]['atr']
+            current_atr = self._safe_get_feature_data(self.current_step, 'atr', 0.01)
             
             # Handle NaN or invalid ATR values
             if pd.isna(current_atr) or current_atr <= 0:
                 # Fallback: use recent ATR or calculate a simple estimate
-                recent_atr_values = self.feature_columns.iloc[max(0, self.current_step-10):self.current_step+1]['atr'].dropna()
-                if len(recent_atr_values) > 0:
-                    current_atr = recent_atr_values.iloc[-1]
+                start_idx = max(0, self.current_step-10)
+                end_idx = min(self.current_step+1, len(self.feature_columns))
+                if end_idx > start_idx:
+                    recent_atr_values = self.feature_columns.iloc[start_idx:end_idx]['atr'].dropna()
+                    if len(recent_atr_values) > 0:
+                        current_atr = recent_atr_values.iloc[-1]
+                    else:
+                        # Final fallback: estimate ATR as 1% of current price
+                        current_atr = current_price * 0.01
                 else:
-                    # Final fallback: estimate ATR as 1% of current price
                     current_atr = current_price * 0.01
                     
             return float(current_atr)
@@ -945,9 +976,9 @@ class FuturesTradingEnv(gym.Env):
             }
         
         try:
-            current_price = self.price_data.iloc[self.current_step]['close']
+            current_price = self._safe_get_price_data(self.current_step, 'close', 0.0)
             current_atr = self._get_current_atr(current_price)
-            atr_percentage = current_atr / current_price
+            atr_percentage = current_atr / current_price if current_price > 0 else 0
             
             dynamic_stop_pct, dynamic_tp_pct = self._calculate_dynamic_stops(current_atr, current_price)
             
@@ -1045,12 +1076,12 @@ class FuturesTradingEnv(gym.Env):
         duration_hours = duration_steps * 0.25  # 15min intervals
         
         entry_datetime = pd.to_datetime(
-            self.price_data.iloc[self.trade_start_step]['timestamp'], 
+            self._safe_get_price_data(self.trade_start_step, 'timestamp', 0), 
             unit='s'
         ).strftime('%d/%m/%Y %H:%M')
         
         close_datetime = pd.to_datetime(
-            self.price_data.iloc[self.current_step]['timestamp'], 
+            self._safe_get_price_data(self.current_step, 'timestamp', 0), 
             unit='s'
         ).strftime('%d/%m/%Y %H:%M')
         
@@ -1173,7 +1204,7 @@ class FuturesTradingEnv(gym.Env):
                 "liquidation_distance": None
             }
         
-        current_price = self.price_data.iloc[self.current_step]['close']
+        current_price = self._safe_get_price_data(self.current_step, 'close', 0.0)
         margin_balance = self._calculate_margin_balance(current_price)
         maintenance_margin_required = self._calculate_maintenance_margin_required(current_price)
         
@@ -1400,10 +1431,10 @@ class FuturesTradingEnv(gym.Env):
                 
                 # Bonus if market is volatile (good time to wait)
                 if len(self.price_data) > self.current_step + 1:
-                    current_price = self.price_data.iloc[self.current_step]['close']
-                    if self.current_step >= 5:
+                    current_price = self._safe_get_price_data(self.current_step, 'close', 0.0)
+                    if self.current_step >= 5 and current_price > 0:
                         recent_volatility = np.std([
-                            self.price_data.iloc[i]['close'] 
+                            self._safe_get_price_data(i, 'close', current_price)
                             for i in range(max(0, self.current_step-5), self.current_step)
                         ]) / current_price
                         
@@ -1417,11 +1448,12 @@ class FuturesTradingEnv(gym.Env):
                 # Penalty for holding when there's a clear profitable opportunity
                 if self.position_size == 0 and len(self.equity_history) > 10:
                     # Check if we missed a clear trend
-                    recent_price_change = ((self.price_data.iloc[self.current_step]['close'] - 
-                                          self.price_data.iloc[max(0, self.current_step-10)]['close']) / 
-                                         self.price_data.iloc[max(0, self.current_step-10)]['close'])
-                    if abs(recent_price_change) > 0.05:  # Strong 5%+ move
-                        hold_reward *= 0.5  # Reduce reward for missing opportunities
+                    current_price = self._safe_get_price_data(self.current_step, 'close', 0.0)
+                    past_price = self._safe_get_price_data(max(0, self.current_step-10), 'close', current_price)
+                    if past_price > 0:
+                        recent_price_change = (current_price - past_price) / past_price
+                        if abs(recent_price_change) > 0.05:  # Strong 5%+ move
+                            hold_reward *= 0.5  # Reduce reward for missing opportunities
                 
                 positive_bonus += hold_reward
             
@@ -1502,9 +1534,14 @@ class FuturesTradingEnv(gym.Env):
         """Get current observation with enhanced portfolio features"""
         # Market features (windowed historical data)
         start_idx = max(0, self.current_step - self.window_size)
-        end_idx = self.current_step
+        end_idx = min(self.current_step, len(self.feature_columns_scaled))
         
-        market_features = self.feature_columns_scaled.iloc[start_idx:end_idx].values
+        # Ensure we don't access out-of-bounds indices
+        if end_idx <= start_idx or end_idx > len(self.feature_columns_scaled):
+            # Return zeros if we're out of bounds
+            market_features = np.zeros((self.window_size, len(self.feature_columns.columns)))
+        else:
+            market_features = self.feature_columns_scaled.iloc[start_idx:end_idx].values
         
         # Pad if necessary
         if market_features.shape[0] < self.window_size:
@@ -1596,7 +1633,7 @@ class FuturesTradingEnv(gym.Env):
     def render(self, mode='human'):
         """Render environment state with enhanced risk information"""
         if mode == 'human':
-            current_price = self.price_data.iloc[self.current_step]['close']
+            current_price = self._safe_get_price_data(self.current_step, 'close', 0.0)
             equity_ratio = self.equity / self.initial_equity
             drawdown = (self.max_equity - self.equity) / self.max_equity if self.max_equity > 0 else 0
             
