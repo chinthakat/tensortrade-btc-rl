@@ -592,7 +592,7 @@ def create_train_val_environments(df: pd.DataFrame, params: Dict[str, Any], log_
         liquidation_fee_rate=params['liquidation_fee_rate'],
         log_file=log_file,
         training_iteration=training_iteration,
-        use_advanced_action_space=True
+        use_advanced_action_space=params.get('use_advanced_action_space', True)  # Read from config
     )
     
     # Wrap both environments for algorithm compatibility
@@ -617,7 +617,7 @@ def create_environment(df: pd.DataFrame, params: Dict[str, Any], log_file: str =
         liquidation_fee_rate=params['liquidation_fee_rate'],
         log_file=log_file,
         training_iteration=training_iteration,
-        use_advanced_action_space=True  # Enable advanced action space by default
+        use_advanced_action_space=params.get('use_advanced_action_space', True)  # Read from config
     )
     
     # Wrap environment for PPO compatibility (Dict → Box conversion)
@@ -1020,6 +1020,21 @@ def main():
             algorithm = loaded_config.get('algorithm')
             training_params = loaded_config.get('training_params', {})
             hyperparams = loaded_config.get('hyperparameters', {})
+            
+            # Merge environment_config into training_params for backward compatibility
+            env_config = loaded_config.get('environment_config', {})
+            if env_config:
+                training_params.update(env_config)
+            
+            # Also check for newer config structure (training_config/environment_config)
+            training_config = loaded_config.get('training_config', {})
+            if training_config:
+                training_params.update(training_config)
+            
+            # Environment config takes precedence
+            env_config_new = loaded_config.get('environment_config', {})
+            if env_config_new:
+                training_params.update(env_config_new)
             
             # Validate loaded data
             if not data_file or not os.path.exists(data_file):
