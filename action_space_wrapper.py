@@ -123,6 +123,16 @@ class DictToBoxActionWrapper(gym.ActionWrapper):
         else:
             # Pass through for simple action space
             return action
+    
+    def __getattr__(self, name):
+        """
+        Forward attribute access to the underlying environment.
+        This allows accessing attributes like price_data, current_step, etc.
+        """
+        if hasattr(self.env, name):
+            return getattr(self.env, name)
+        else:
+            raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
 
 
 class BoxToDictActionWrapper(gym.ActionWrapper):
@@ -170,6 +180,16 @@ class BoxToDictActionWrapper(gym.ActionWrapper):
                 'leverage': np.array([leverage], dtype=np.float32),
                 'risk_percentage': np.array([risk_percentage], dtype=np.float32)
             }
+    
+    def __getattr__(self, name):
+        """
+        Forward attribute access to the underlying environment.
+        This allows accessing attributes like price_data, current_step, etc.
+        """
+        if hasattr(self.env, name):
+            return getattr(self.env, name)
+        else:
+            raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
 
 
 def wrap_environment_for_algorithm(env, algorithm_name: str = "PPO"):

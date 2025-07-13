@@ -426,6 +426,94 @@ def show_help():
     
     console.print(Panel(help_text, title="Help & Documentation", border_style="blue"))
 
+def archive_data_analysis_subfolders():
+    """Archive DATA_ANALYSIS subfolders to keep only source code"""
+    try:
+        from pathlib import Path
+        import shutil
+        from datetime import datetime
+        
+        data_analysis_dir = Path("DATA_ANALYSIS")
+        archive_dir = Path("archive")
+        
+        if not data_analysis_dir.exists():
+            console.print("[yellow]DATA_ANALYSIS directory not found[/yellow]")
+            return True
+        
+        # Create archive directory if it doesn't exist
+        archive_dir.mkdir(exist_ok=True)
+        
+        # Get current timestamp for archive name
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        archive_name = f"data_analysis_subfolders_{timestamp}.zip"
+        archive_path = archive_dir / archive_name
+        
+        # Find subfolders to archive (ignore Python files and markdown)
+        subfolders_to_archive = []
+        files_to_archive = []
+        
+        for item in data_analysis_dir.iterdir():
+            if item.is_dir():
+                # Archive all subfolders
+                subfolders_to_archive.append(item)
+            elif item.is_file():
+                # Archive non-source files (CSV, JSON, etc. in root)
+                if item.suffix.lower() in ['.csv', '.json', '.log', '.tmp', '.cache']:
+                    files_to_archive.append(item)
+        
+        if not subfolders_to_archive and not files_to_archive:
+            console.print("[yellow]No DATA_ANALYSIS subfolders or data files to archive[/yellow]")
+            return True
+        
+        # Create the archive
+        import zipfile
+        archived_count = 0
+        
+        with zipfile.ZipFile(archive_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            # Archive subfolders
+            for subfolder in subfolders_to_archive:
+                for file_path in subfolder.rglob('*'):
+                    if file_path.is_file():
+                        # Calculate relative path from DATA_ANALYSIS
+                        rel_path = file_path.relative_to(data_analysis_dir)
+                        zipf.write(file_path, f"DATA_ANALYSIS/{rel_path}")
+                        archived_count += 1
+            
+            # Archive data files in root
+            for file_path in files_to_archive:
+                rel_path = file_path.relative_to(data_analysis_dir)
+                zipf.write(file_path, f"DATA_ANALYSIS/{rel_path}")
+                archived_count += 1
+        
+        if archived_count > 0:
+            # Remove archived subfolders and files
+            for subfolder in subfolders_to_archive:
+                if subfolder.exists():
+                    shutil.rmtree(subfolder)
+                    console.print(f"  🗂️ Archived and removed: {subfolder.name}/")
+            
+            for file_path in files_to_archive:
+                if file_path.exists():
+                    file_path.unlink()
+                    console.print(f"  📄 Archived and removed: {file_path.name}")
+            
+            # Show archive info
+            archive_size = archive_path.stat().st_size / 1024  # KB
+            console.print(f"[green]✅ Created archive: {archive_name}[/green]")
+            console.print(f"[green]   📦 Size: {archive_size:.1f} KB | Files: {archived_count}[/green]")
+            
+            return True
+        else:
+            # Remove empty archive if no files were added
+            if archive_path.exists():
+                archive_path.unlink()
+            console.print("[yellow]No files found to archive[/yellow]")
+            return True
+            
+    except Exception as e:
+        console.print(f"[red]❌ Error archiving DATA_ANALYSIS subfolders: {str(e)}[/red]")
+        return False
+
 def archive_logs_menu():
     """Interactive log archiving menu"""
     console.print("\n[bold]🗂️ Log Archiving Options[/bold]")
@@ -436,6 +524,7 @@ def archive_logs_menu():
     models_dir = Path("models") 
     tensorboard_dir = Path("tensorboard_logs")
     archive_dir = Path("archive")
+    data_analysis_dir = Path("DATA_ANALYSIS")
     
     # Count current files
     log_files = list(logs_dir.glob("*.csv")) + list(logs_dir.glob("*.log")) + list(logs_dir.glob("*.npz")) if logs_dir.exists() else []
@@ -455,6 +544,16 @@ def archive_logs_menu():
                 for pattern in ["*.csv", "*.log", "*.npz"]:
                     episode_log_files.extend(episode_logs_dir.glob(pattern))
     
+    # Count DATA_ANALYSIS files and subfolders
+    data_analysis_files = []
+    data_analysis_subfolders = []
+    if data_analysis_dir.exists():
+        # Count subfolders that contain files
+        data_analysis_subfolders = [d for d in data_analysis_dir.iterdir() if d.is_dir()]
+        for subfolder in data_analysis_subfolders:
+            for pattern in ["*.csv", "*.json", "*.pdf", "*.png", "*.log"]:
+                data_analysis_files.extend(subfolder.rglob(pattern))
+    
     # Display current status
     status_table = Table(title="Current File Status")
     status_table.add_column("Type", style="cyan")
@@ -465,6 +564,7 @@ def archive_logs_menu():
     status_table.add_row("Episode Logs", str(len(episode_log_files)), f"episodes/ ({len(episode_dirs)} dirs)")
     status_table.add_row("Model Files", str(len(model_files)), "models/")
     status_table.add_row("TensorBoard Dirs", str(len(tb_dirs)), "tensorboard_logs/")
+    status_table.add_row("Analysis Files", str(len(data_analysis_files)), f"DATA_ANALYSIS/ ({len(data_analysis_subfolders)} subdirs)")
     status_table.add_row("Archives", str(len(archive_files)), "archive/")
     
     console.print(status_table)
@@ -475,15 +575,16 @@ def archive_logs_menu():
     archive_table.add_column("Description", style="white")
     
     archive_options = [
-        ("1", "🗂️ Archive All (Automatic Settings)"),
+        ("1", "🗂️ Archive All (Automatic Settings + Analysis)"),
         ("2", "📊 Archive Logs Only (includes episode logs)"),
         ("3", "🤖 Archive Models Only"),
         ("4", "📈 Archive TensorBoard Only"),
-        ("5", "⚡ Quick Archive (1 day old files)"),
-        ("6", "🗑️ Archive Everything (All files including episodes)"),
-        ("7", "📋 View Archive Contents"),
-        ("8", "❌ Cancel"),
-        ("9", "🔙 Back to Main Menu")
+        ("5", "🔬 Archive DATA_ANALYSIS Subfolders Only"),
+        ("6", "⚡ Quick Archive (1 day old files)"),
+        ("7", "🗑️ Archive Everything (All files including episodes & analysis)"),
+        ("8", "📋 View Archive Contents"),
+        ("9", "❌ Cancel"),
+        ("10", "🔙 Back to Main Menu")
     ]
     
     for option, description in archive_options:
@@ -491,14 +592,16 @@ def archive_logs_menu():
     
     console.print(archive_table)
     
-    choice = IntPrompt.ask("\nSelect archive option", default=9)
+    choice = IntPrompt.ask("\nSelect archive option", default=10)
     
     try:
         if choice == 1:
-            # Standard archiving with config settings
-            console.print("[bold]🗂️ Running standard archiving...[/bold]")
+            # Standard archiving with config settings + DATA_ANALYSIS
+            console.print("[bold]🗂️ Running standard archiving (including DATA_ANALYSIS)...[/bold]")
             success = archive_startup_logs(base_dir=".")
-            if success:
+            # Also archive DATA_ANALYSIS subfolders
+            success_analysis = archive_data_analysis_subfolders()
+            if success and success_analysis:
                 console.print("[green]✅ Archiving completed successfully![/green]")
             else:
                 console.print("[red]❌ Archiving had some issues[/red]")
@@ -531,6 +634,15 @@ def archive_logs_menu():
                 console.print("[green]✅ TensorBoard archiving completed![/green]")
             
         elif choice == 5:
+            # Archive DATA_ANALYSIS subfolders only
+            console.print("[bold]🔬 Archiving DATA_ANALYSIS subfolders only...[/bold]")
+            success = archive_data_analysis_subfolders()
+            if success:
+                console.print("[green]✅ DATA_ANALYSIS archiving completed![/green]")
+            else:
+                console.print("[red]❌ DATA_ANALYSIS archiving failed![/red]")
+            
+        elif choice == 6:
             # Quick archive (1 day old)
             console.print("[bold]⚡ Quick archive (1 day old files)...[/bold]")
             success = archive_startup_logs(
@@ -542,16 +654,20 @@ def archive_logs_menu():
             if success:
                 console.print("[green]✅ Quick archiving completed![/green]")
             
-        elif choice == 6:
+        elif choice == 7:
             # Archive everything (all files immediately)
-            console.print("[bold]🗑️ Archiving all files...[/bold]")
+            console.print("[bold]🗑️ Archiving all files (including DATA_ANALYSIS)...[/bold]")
             from log_archiver import LogArchiver
             archiver = LogArchiver(".")
             success = archiver.archive_everything_now()
-            if success:
+            # Also archive DATA_ANALYSIS subfolders
+            success_analysis = archive_data_analysis_subfolders()
+            if success and success_analysis:
                 console.print("[green]✅ Complete archiving finished![/green]")
+            else:
+                console.print("[red]❌ Some archiving operations failed![/red]")
                 
-        elif choice == 7:
+        elif choice == 8:
             # View archive contents
             console.print("\n[bold]📋 Archive Contents:[/bold]")
             if archive_files:
@@ -563,16 +679,16 @@ def archive_logs_menu():
             else:
                 console.print("  [yellow]No archive files found[/yellow]")
                 
-        elif choice == 8:
+        elif choice == 9:
             # Cancel - do nothing
             console.print("[yellow]Archive operation cancelled[/yellow]")
             return
             
-        elif choice == 9:
+        elif choice == 10:
             return
             
         # Pause before returning to menu
-        if choice not in [8, 9]:  # Don't pause for Cancel or Back options
+        if choice not in [9, 10]:  # Don't pause for Cancel or Back options
             input("\nPress Enter to continue...")
             
     except Exception as e:
