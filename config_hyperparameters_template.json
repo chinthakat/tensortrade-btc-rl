@@ -13,7 +13,8 @@
     "take_profit_pct": 0.04,
     "maintenance_margin_rate": 0.004,
     "liquidation_fee_rate": 0.005,
-    "n_envs": 4
+    "n_envs": 4,
+    "train_ratio": 0.7
   },
   "hyperparameters": {
     "ppo": {

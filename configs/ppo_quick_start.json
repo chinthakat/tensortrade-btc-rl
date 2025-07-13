@@ -6,14 +6,15 @@
   "algorithm": "ppo",
   "training_params": {
     "total_timesteps": 50000,
-    "max_leverage": 25.0,
+    "max_leverage": 5.0,
     "initial_equity": 10000.0,
     "window_size": 60,
     "stop_loss_pct": 0.02,
     "take_profit_pct": 0.04,
     "maintenance_margin_rate": 0.004,
     "liquidation_fee_rate": 0.005,
-    "n_envs": 4
+    "n_envs": 4,
+    "train_ratio": 0.7
   },
   "hyperparameters": {
     "learning_rate": 3e-4,
