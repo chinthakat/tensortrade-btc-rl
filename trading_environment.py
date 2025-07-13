@@ -209,10 +209,11 @@ class FuturesTradingEnv(gym.Env):
         
         # Define action space based on configuration
         if self.use_advanced_action_space:
-            # Phase 1: Advanced Dict action space (leverage + risk percentage)
+            # Phase 1: Enhanced action space with explicit HOLD/CANCEL actions
             self.action_space = spaces.Dict({
+                'action_type': spaces.Discrete(4),  # 0=HOLD, 1=BUY, 2=SELL, 3=CANCEL
                 'leverage': spaces.Box(
-                    low=-self.max_leverage, 
+                    low=0.1,  # Minimum leverage when trading
                     high=self.max_leverage, 
                     shape=(1,), 
                     dtype=np.float32
@@ -225,13 +226,16 @@ class FuturesTradingEnv(gym.Env):
                 )
             })
         else:
-            # Legacy simple action space: continuous leverage only
+            # Legacy simple action space: continuous leverage only with threshold
             self.action_space = spaces.Box(
                 low=-self.max_leverage, 
                 high=self.max_leverage, 
                 shape=(1,), 
                 dtype=np.float32
             )
+            
+        # Set trading threshold for legacy mode
+        self.trading_threshold = 0.1  # Minimum leverage to trigger trade
         
         # Define observation space with enhanced portfolio features
         n_features = self.feature_columns.shape[1]
@@ -257,6 +261,11 @@ class FuturesTradingEnv(gym.Env):
         self.moderate_loss_threshold = 0.30  # 30% of initial equity - increase penalties
         self.balance_history = deque(maxlen=20)  # Track balance trend
         self.loss_penalty_multiplier = 1.0  # Dynamic penalty multiplier
+        
+        # Action tracking for enhanced rewards
+        self.last_action_type = "HOLD"  # Track last action for reward calculation
+        self.hold_streak = 0  # Count consecutive holds
+        self.trade_streak = 0  # Count consecutive trades
     
     def _prepare_features(self, training_end_idx: Optional[int] = None):
         """
@@ -423,6 +432,11 @@ class FuturesTradingEnv(gym.Env):
         self.total_realized_pnl = 0.0
         self.balance_trend_slope = 0.0  # Track if balance is declining
         
+        # Action tracking for enhanced rewards
+        self.last_action_type = "HOLD"
+        self.hold_streak = 0
+        self.trade_streak = 0
+        
         # Risk management flags
         self.severe_drawdown_triggered = False
         self.moderate_drawdown_triggered = False
@@ -439,21 +453,42 @@ class FuturesTradingEnv(gym.Env):
     def step(self, action) -> Tuple[Dict, float, bool, bool, Dict]:
         """Execute one step in the environment"""
         # Parse action based on action space type
+        action_type = "TRADE"  # Default for legacy mode
+        leverage = 0.0
+        risk_percentage = 1.0
+        
         if self.use_advanced_action_space:
-            # Advanced action space: Dict with leverage and risk_percentage
+            # Enhanced action space: Dict with action_type, leverage and risk_percentage
             if isinstance(action, dict):
+                action_type_idx = action['action_type'] if isinstance(action['action_type'], int) else action['action_type'][0]
                 leverage = action['leverage'][0] if isinstance(action['leverage'], np.ndarray) else action['leverage']
                 risk_percentage = action['risk_percentage'][0] if isinstance(action['risk_percentage'], np.ndarray) else action['risk_percentage']
             else:
-                # If action is from wrapper, it's a numpy array [leverage, risk_percentage]
-                leverage = action[0]
-                risk_percentage = action[1]
+                # If action is from wrapper, it's a numpy array [action_type, leverage, risk_percentage]
+                action_type_idx = int(action[0])
+                leverage = action[1]
+                risk_percentage = action[2]
+            
+            # Map action type
+            action_types = ["HOLD", "BUY", "SELL", "CANCEL"]
+            action_type = action_types[action_type_idx]
             
             # Clip values to valid ranges
-            leverage = float(np.clip(leverage, -self.max_leverage, self.max_leverage))
+            leverage = float(np.clip(leverage, 0.1, self.max_leverage))
             risk_percentage = float(np.clip(risk_percentage, 0.01, 1.0))
+            
+            # Convert BUY/SELL to leverage values
+            if action_type == "BUY":
+                leverage = abs(leverage)  # Positive leverage for long
+            elif action_type == "SELL":
+                leverage = -abs(leverage)  # Negative leverage for short
+            elif action_type == "HOLD":
+                leverage = 0.0  # No new position
+            elif action_type == "CANCEL":
+                leverage = 0.0  # Close position
+                risk_percentage = 1.0  # Use full risk for closing
         else:
-            # Legacy action space: single leverage value
+            # Legacy action space: single leverage value with threshold
             if isinstance(action, dict):
                 # This shouldn't happen in legacy mode, but handle gracefully
                 leverage = action.get('leverage', 0.0)
@@ -462,7 +497,26 @@ class FuturesTradingEnv(gym.Env):
             else:
                 leverage = action[0] if isinstance(action, (list, np.ndarray)) else action
             leverage = float(np.clip(leverage, -self.max_leverage, self.max_leverage))
+            
+            # Apply trading threshold - treat small leverage as HOLD
+            if abs(leverage) < self.trading_threshold:
+                action_type = "HOLD"
+                leverage = 0.0
+            else:
+                action_type = "BUY" if leverage > 0 else "SELL"
+            
             risk_percentage = 1.0  # Use full equity (legacy behavior)
+        
+        # Store action type for reward calculation
+        self.last_action_type = action_type
+        
+        # Update action streaks
+        if action_type == "HOLD":
+            self.hold_streak += 1
+            self.trade_streak = 0
+        else:
+            self.trade_streak += 1
+            self.hold_streak = 0
         
         # Store previous state
         prev_equity = self.equity
@@ -492,7 +546,15 @@ class FuturesTradingEnv(gym.Env):
         
         # Execute new action if not liquidated
         if not liquidation_triggered and not sl_tp_triggered:
-            self._execute_action(leverage, risk_percentage, current_price)
+            if action_type == "HOLD":
+                # Do nothing - just hold current position
+                pass
+            elif action_type == "CANCEL":
+                # Close current position
+                self._close_position(current_price, "CANCEL_ACTION")
+            else:
+                # Execute BUY/SELL action
+                self._execute_action(leverage, risk_percentage, current_price)
         
         # Update tracking
         self.equity_history.append(self.equity)
@@ -1282,6 +1344,57 @@ class FuturesTradingEnv(gym.Env):
         
         # === POSITIVE REWARDS === - using configurable parameters
         positive_bonus = 0.0
+        
+        # HOLD action reward (encourage patience)
+        if hasattr(self, 'last_action_type'):
+            if self.last_action_type == "HOLD":
+                # Base hold reward for patience
+                hold_reward = 0.001  # Small positive reward for holding
+                
+                # Bonus if market is volatile (good time to wait)
+                if len(self.price_data) > self.current_step + 1:
+                    current_price = self.price_data.iloc[self.current_step]['close']
+                    if self.current_step >= 5:
+                        recent_volatility = np.std([
+                            self.price_data.iloc[i]['close'] 
+                            for i in range(max(0, self.current_step-5), self.current_step)
+                        ]) / current_price
+                        
+                        if recent_volatility > 0.02:  # High volatility
+                            hold_reward *= 2.0  # Double reward for holding during volatility
+                
+                # Bonus if no clear trend (good time to wait)
+                if hasattr(self, 'trend_strength') and self.trend_strength < 0.3:
+                    hold_reward *= 1.5  # 50% bonus for holding during unclear trends
+                
+                # Penalty for holding when there's a clear profitable opportunity
+                if self.position_size == 0 and len(self.equity_history) > 10:
+                    # Check if we missed a clear trend
+                    recent_price_change = ((self.price_data.iloc[self.current_step]['close'] - 
+                                          self.price_data.iloc[max(0, self.current_step-10)]['close']) / 
+                                         self.price_data.iloc[max(0, self.current_step-10)]['close'])
+                    if abs(recent_price_change) > 0.05:  # Strong 5%+ move
+                        hold_reward *= 0.5  # Reduce reward for missing opportunities
+                
+                positive_bonus += hold_reward
+            
+            elif self.last_action_type == "CANCEL":
+                # Reward good exit decisions
+                if self.last_trade_pnl > 0:
+                    positive_bonus += 0.005  # Reward taking profits
+                elif self.unrealized_pnl < -0.02 * self.equity:  # Stop loss
+                    positive_bonus += 0.002  # Reward cutting losses
+        
+        # Penalize excessive trading (overtrading)
+        if hasattr(self, 'trade_streak') and self.trade_streak > 5:
+            positive_bonus -= 0.001 * (self.trade_streak - 5)  # Increasing penalty for overtrading
+        
+        # Reward patient holding streaks (but not too long)
+        if hasattr(self, 'hold_streak'):
+            if 3 <= self.hold_streak <= 10:  # Optimal patience range
+                positive_bonus += 0.0005 * self.hold_streak
+            elif self.hold_streak > 20:  # Too much inaction
+                positive_bonus -= 0.0005 * (self.hold_streak - 20)
         
         # Position holding bonus (encourage longer-term thinking)
         if self.position_size != 0 and self.trade_start_step:
