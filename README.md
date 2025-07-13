@@ -21,6 +21,7 @@ A sophisticated cryptocurrency trading bot powered by deep reinforcement learnin
 - **Rich CLI Interface**: Beautiful command-line interface with progress tracking
 - **Comprehensive Logging**: Detailed trade logs in CSV format
 - **Data Preprocessing**: Built-in technical indicators and feature engineering
+- **Automatic Log Archiving**: Intelligent log management with compressed archives
 
 ## 📋 Requirements
 
@@ -55,6 +56,46 @@ mkdir logs
 ```bash
 python main.py
 # Select option 5 → Download data from Binance
+```
+
+## 🗂️ Automatic Log Management
+
+The system includes intelligent log archiving to keep your workspace organized:
+
+### Features
+- **Automatic Archiving**: Old logs are automatically compressed and archived on startup
+- **Configurable Retention**: Customize how long to keep logs before archiving
+- **Multiple File Types**: Archives logs, models, and TensorBoard files separately
+- **Space Efficient**: Compressed archives save disk space
+- **Archive Cleanup**: Automatically removes old archives to prevent bloat
+
+### Default Archive Schedule
+- **Log Files** (trades_*.csv, *.log): Archived after 3 days
+- **Model Files** (*.zip, *.pkl): Archived after 14 days (except best_model.zip)
+- **TensorBoard Logs**: Archived after 7 days
+- **Archive Cleanup**: Keeps maximum 15 archive files
+
+### Configuration
+Edit `archive_config.json` to customize archiving behavior:
+```json
+{
+  "archiving": {
+    "enabled": true,
+    "log_age_days": 3,
+    "model_age_days": 14,
+    "tensorboard_age_days": 7
+  }
+}
+```
+
+### Manual Archiving
+```bash
+# Test archiving system
+python test_archiving.py
+
+# Or use in Python
+from log_archiver import archive_startup_logs
+archive_startup_logs(base_dir=".")
 ```
 
 ## 🎯 Quick Start
