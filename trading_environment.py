@@ -1615,8 +1615,8 @@ class FuturesTradingEnv(gym.Env):
         Returns:
             Tuple of (train_env, val_env)
         """
-        if train_ratio + val_ratio > 1.0:
-            raise ValueError("train_ratio + val_ratio cannot exceed 1.0")
+        if train_ratio + val_ratio > 1.0001:  # Allow small floating point precision errors
+            raise ValueError(f"train_ratio ({train_ratio}) + val_ratio ({val_ratio}) = {train_ratio + val_ratio:.4f} cannot exceed 1.0")
         
         total_samples = len(df)
         train_end_idx = int(total_samples * train_ratio)

@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from datetime import datetime
 from rich.console import Console
-from rich.prompt import Prompt, IntPrompt, Confirm
+from rich.prompt import Prompt, IntPrompt
 from rich.table import Table
 from rich.panel import Panel
 from rich.text import Text
@@ -157,17 +157,34 @@ def live_trading():
     
     console.print(Panel(risk_warning, title="Risk Warning", border_style="red"))
     
-    if not Confirm.ask("Do you understand and accept these risks?"):
+    # Create menu for risk acceptance
+    risk_table = Table(title="Live Trading Options")
+    risk_table.add_column("Option", style="cyan", no_wrap=True, width=4)
+    risk_table.add_column("Description", style="white")
+    
+    risk_options = [
+        ("1", "✅ I understand and accept the risks - Proceed with Live Trading"),
+        ("2", "❌ Cancel - Return to Main Menu")
+    ]
+    
+    for option, description in risk_options:
+        risk_table.add_row(option, description)
+    
+    console.print(risk_table)
+    
+    choice = IntPrompt.ask("\nSelect option", default=2)
+    
+    if choice == 1:
+        try:
+            from live_trading import setup_live_trading
+            setup_live_trading()
+        except ImportError as e:
+            console.print(f"[red]❌ Error importing live trading module: {str(e)}[/red]")
+        except Exception as e:
+            console.print(f"[red]❌ Live trading error: {str(e)}[/red]")
+    else:
         console.print("[yellow]Live trading cancelled[/yellow]")
         return
-    
-    try:
-        from live_trading import setup_live_trading
-        setup_live_trading()
-    except ImportError as e:
-        console.print(f"[red]❌ Error importing live trading module: {str(e)}[/red]")
-    except Exception as e:
-        console.print(f"[red]❌ Live trading error: {str(e)}[/red]")
 
 def data_preprocessing():
     """Data preprocessing utilities"""
@@ -452,7 +469,8 @@ def archive_logs_menu():
         ("5", "⚡ Quick Archive (1 day old files)"),
         ("6", "🗑️ Archive Everything (All files)"),
         ("7", "📋 View Archive Contents"),
-        ("8", "🔙 Back to Main Menu")
+        ("8", "❌ Cancel"),
+        ("9", "🔙 Back to Main Menu")
     ]
     
     for option, description in archive_options:
@@ -460,7 +478,7 @@ def archive_logs_menu():
     
     console.print(archive_table)
     
-    choice = IntPrompt.ask("\nSelect archive option", default=8)
+    choice = IntPrompt.ask("\nSelect archive option", default=9)
     
     try:
         if choice == 1:
@@ -512,16 +530,13 @@ def archive_logs_menu():
                 console.print("[green]✅ Quick archiving completed![/green]")
             
         elif choice == 6:
-            # Archive everything (0 days = all files)
-            if Confirm.ask("[red]⚠️ This will archive ALL files. Continue?[/red]"):
-                console.print("[bold]🗑️ Archiving all files...[/bold]")
-                from log_archiver import LogArchiver
-                archiver = LogArchiver(".")
-                success = archiver.archive_everything_now()
-                if success:
-                    console.print("[green]✅ Complete archiving finished![/green]")
-            else:
-                console.print("[yellow]Archive cancelled[/yellow]")
+            # Archive everything (all files immediately)
+            console.print("[bold]🗑️ Archiving all files...[/bold]")
+            from log_archiver import LogArchiver
+            archiver = LogArchiver(".")
+            success = archiver.archive_everything_now()
+            if success:
+                console.print("[green]✅ Complete archiving finished![/green]")
                 
         elif choice == 7:
             # View archive contents
@@ -536,10 +551,15 @@ def archive_logs_menu():
                 console.print("  [yellow]No archive files found[/yellow]")
                 
         elif choice == 8:
+            # Cancel - do nothing
+            console.print("[yellow]Archive operation cancelled[/yellow]")
+            return
+            
+        elif choice == 9:
             return
             
         # Pause before returning to menu
-        if choice != 8:
+        if choice not in [8, 9]:  # Don't pause for Cancel or Back options
             input("\nPress Enter to continue...")
             
     except Exception as e:
