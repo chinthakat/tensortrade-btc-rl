@@ -32,3 +32,6 @@ ipykernel>=6.25.0
 
 # Training and logging
 tensorboard>=2.19.0
+
+# Hyperparameter optimization
+optuna>=3.4.0
