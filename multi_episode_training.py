@@ -201,16 +201,26 @@ class MultiEpisodeTrainer:
         os.makedirs(f"{episode_dir}/logs", exist_ok=True)
         
         # Log file for this episode
-        log_file = f"{episode_dir}/logs/trades_{episode_id}.csv"
+        base_log_file = f"{episode_dir}/logs/trades_{episode_id}"
         
         # Create environment function
+        env_counter = 0
         def env_fn():
+            nonlocal env_counter
+            # Filter out parameters that shouldn't be passed to individual environment
+            env_params = {k: v for k, v in self.base_config["training_params"].items() 
+                         if k not in ['n_envs', 'total_timesteps', 'train_ratio']}  # Remove vectorization and training-specific params
+            
+            # Create unique log file for each environment instance to avoid conflicts
+            instance_log_file = f"{base_log_file}_env{env_counter}.csv"
+            env_counter += 1
+            
             env = FuturesTradingEnv(
                 df=train_data,
-                log_file=log_file,
+                log_file=instance_log_file,
                 training_iteration=episode_num,
                 use_advanced_action_space=True,  # Enable advanced action space by default
-                **self.base_config["training_params"]
+                **env_params
             )
             # Wrap environment for PPO compatibility
             return wrap_environment_for_algorithm(env, "PPO")
