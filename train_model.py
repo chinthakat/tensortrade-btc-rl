@@ -16,7 +16,7 @@ from pathlib import Path
 
 # Rich library for beautiful console output
 from rich.console import Console
-from rich.prompt import Prompt, Confirm, IntPrompt, FloatPrompt
+from rich.prompt import Prompt, IntPrompt, FloatPrompt
 from rich.table import Table
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
 from rich.panel import Panel
@@ -432,22 +432,41 @@ def get_hyperparameters(algorithm: str) -> Dict[str, Any]:
             show_default=True
         )
     
-    # Ask about environment normalization
-    params['use_normalization'] = Confirm.ask(
-        "\n🔧 Use environment normalization? (Recommended for stable training)",
-        default=True
-    )
+    # Environment normalization menu
+    norm_table = Table(title="Environment Normalization Options")
+    norm_table.add_column("Option", style="cyan", no_wrap=True, width=4)
+    norm_table.add_column("Description", style="white")
     
-    if params['use_normalization']:
-        params['norm_obs'] = Confirm.ask(
-            "📊 Normalize observations?",
-            default=True
-        )
-        
-        params['norm_reward'] = Confirm.ask(
-            "🎁 Normalize rewards?",
-            default=True
-        )
+    norm_options = [
+        ("1", "🔧 Use full normalization (observations + rewards) - Recommended"),
+        ("2", "📊 Normalize observations only"),
+        ("3", "🎁 Normalize rewards only"),
+        ("4", "❌ No normalization"),
+    ]
+    
+    for option, description in norm_options:
+        norm_table.add_row(option, description)
+    
+    console.print(norm_table)
+    
+    norm_choice = IntPrompt.ask("\nSelect normalization option", default=1)
+    
+    if norm_choice == 1:
+        params['use_normalization'] = True
+        params['norm_obs'] = True
+        params['norm_reward'] = True
+    elif norm_choice == 2:
+        params['use_normalization'] = True
+        params['norm_obs'] = True
+        params['norm_reward'] = False
+    elif norm_choice == 3:
+        params['use_normalization'] = True
+        params['norm_obs'] = False
+        params['norm_reward'] = True
+    else:
+        params['use_normalization'] = False
+        params['norm_obs'] = False
+        params['norm_reward'] = False
         
         params['clip_obs'] = FloatPrompt.ask(
             "✂️ Observation clipping value",
@@ -486,17 +505,33 @@ def check_existing_models() -> Optional[str]:
     
     console.print(table)
     
-    # Ask if user wants to continue training existing model
-    if Confirm.ask("\n🔄 Continue training an existing model?", default=False):
+    # Create model selection menu
+    model_menu_table = Table(title="Model Training Options")
+    model_menu_table.add_column("Option", style="cyan", no_wrap=True, width=4)
+    model_menu_table.add_column("Description", style="white")
+    
+    model_options = [
+        ("1", "🔄 Continue training an existing model"),
+        ("2", "🆕 Start training a new model"),
+    ]
+    
+    for option, description in model_options:
+        model_menu_table.add_row(option, description)
+    
+    console.print(model_menu_table)
+    
+    choice = IntPrompt.ask("\nSelect option", default=2)
+    
+    if choice == 1:
         while True:
             try:
-                choice = IntPrompt.ask(
+                model_choice = IntPrompt.ask(
                     "🎯 Select model to continue (enter number)",
                     default=1,
                     show_default=True
                 )
-                if 1 <= choice <= len(model_files):
-                    selected_model = model_files[choice-1]
+                if 1 <= model_choice <= len(model_files):
+                    selected_model = model_files[model_choice-1]
                     console.print(f"✅ Selected: [green]{selected_model.name}[/green]")
                     return str(selected_model)
                 else:
@@ -538,11 +573,16 @@ def load_data(file_path: str) -> pd.DataFrame:
 def create_train_val_environments(df: pd.DataFrame, params: Dict[str, Any], log_file: str = None, training_iteration: int = 0, train_ratio: float = 0.7):
     """Create separate training and validation environments with proper data splitting"""
     
+    # Calculate validation ratio to ensure they don't exceed 1.0
+    val_ratio = min(0.3, 1.0 - train_ratio)  # Use up to 30% for validation, but not more than what's left
+    
+    console.print(f"📊 Data split: {train_ratio:.1%} training, {val_ratio:.1%} validation")
+    
     # Use the class method to create properly split environments
     train_env, val_env = FuturesTradingEnv.create_train_val_environments(
         df=df,
         train_ratio=train_ratio,
-        val_ratio=0.3,  # Use remaining 30% for validation
+        val_ratio=val_ratio,
         initial_equity=params['initial_equity'],
         max_leverage=params['max_leverage'],
         window_size=params['window_size'],
@@ -739,19 +779,36 @@ def load_config_from_file() -> Optional[Dict[str, Any]]:
     
     console.print(table)
     
-    if Confirm.ask("\n📥 Load configuration from existing file?", default=False):
+    # Create configuration loading menu
+    config_menu_table = Table(title="Configuration Options")
+    config_menu_table.add_column("Option", style="cyan", no_wrap=True, width=4)
+    config_menu_table.add_column("Description", style="white")
+    
+    config_options = [
+        ("1", "📥 Load configuration from existing file"),
+        ("2", "⚙️ Continue with manual configuration"),
+    ]
+    
+    for option, description in config_options:
+        config_menu_table.add_row(option, description)
+    
+    console.print(config_menu_table)
+    
+    choice = IntPrompt.ask("\nSelect option", default=2)
+    
+    if choice == 1:
         while True:
             try:
-                choice = IntPrompt.ask(
+                config_choice = IntPrompt.ask(
                     "🎯 Select config file (enter number)",
                     default=1,
                     show_default=True
                 )
-                if 1 <= choice <= len(config_info):
-                    selected_config = config_info[choice-1][0]
+                if 1 <= config_choice <= len(config_info):
+                    selected_config = config_info[config_choice-1][0]
                     with open(selected_config, 'r') as f:
                         config = json.load(f)
-                    console.print(f"✅ Loaded config: [green]{config_info[choice-1][1]}[/green]")
+                    console.print(f"✅ Loaded config: [green]{config_info[config_choice-1][1]}[/green]")
                     return config
                 else:
                     console.print("[red]Invalid choice. Please try again.[/red]")
@@ -1078,8 +1135,24 @@ def main():
             "timestamp": timestamp
         }
         
-        # Ask if user wants to save this configuration for future use
-        if Confirm.ask("\n💾 Save this configuration for future use?", default=True):
+        # Configuration saving menu
+        save_table = Table(title="Configuration Saving Options")
+        save_table.add_column("Option", style="cyan", no_wrap=True, width=4)
+        save_table.add_column("Description", style="white")
+        
+        save_options = [
+            ("1", "💾 Save with custom name for future reuse"),
+            ("2", "📁 Auto-save for session tracking only"),
+        ]
+        
+        for option, description in save_options:
+            save_table.add_row(option, description)
+        
+        console.print(save_table)
+        
+        save_choice = IntPrompt.ask("\nSelect saving option", default=1)
+        
+        if save_choice == 1:
             save_config(config, interactive=True)
         else:
             # Save with auto-generated name for session tracking
