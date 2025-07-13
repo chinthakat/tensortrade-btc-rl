@@ -7,6 +7,8 @@ import os
 import json
 import numpy as np
 import pandas as pd
+import time
+import threading
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 from pathlib import Path
@@ -27,6 +29,61 @@ from trading_environment import FuturesTradingEnv
 from model_architectures import CNNLSTMFeatureExtractor, AttentionCNNLSTMExtractor, ResNetLSTMExtractor
 from backtest import TradingBacktester
 from action_space_wrapper import wrap_environment_for_algorithm
+
+console = Console()
+
+def timeout_confirmation(prompt: str, timeout_seconds: int = 60, default: bool = True) -> bool:
+    """
+    Ask for confirmation with automatic timeout (Windows-compatible).
+    
+    Args:
+        prompt: The confirmation prompt
+        timeout_seconds: Seconds to wait before auto-continuing
+        default: Default response when timeout occurs
+    
+    Returns:
+        True to continue, False to stop
+    """
+    import threading
+    
+    console.print(f"\n[yellow]{prompt}[/yellow]")
+    console.print(f"[dim]Auto-continuing in {timeout_seconds} seconds...[/dim]")
+    console.print(f"[dim]Press Enter to continue now, or type 'n' + Enter to stop[/dim]")
+    
+    result = [default]  # Use list to allow modification in nested function
+    input_received = [False]
+    
+    def get_input():
+        try:
+            user_input = input().strip().lower()
+            input_received[0] = True
+            if user_input in ['n', 'no']:
+                result[0] = False
+            else:
+                result[0] = True
+        except:
+            result[0] = default
+    
+    # Start input thread
+    input_thread = threading.Thread(target=get_input, daemon=True)
+    input_thread.start()
+    
+    # Countdown with progress
+    try:
+        for i in range(timeout_seconds, 0, -1):
+            if input_received[0]:
+                break
+            console.print(f"[dim]Auto-continuing in {i:2d} seconds...[/dim]", end="\r")
+            time.sleep(1)
+        
+        if not input_received[0]:
+            console.print(f"\n[green]✅ Auto-continuing to next episode[/green]")
+        
+        return result[0]
+        
+    except KeyboardInterrupt:
+        console.print(f"\n[yellow]❌ Training stopped by user (Ctrl+C)[/yellow]")
+        return False
 
 console = Console()
 
@@ -469,10 +526,12 @@ class MultiEpisodeTrainer:
                     console.print(f"[red]Episode {episode_num + 1} failed, stopping training[/red]")
                     break
                 
-                # Ask if user wants to continue to next episode
+                # Ask if user wants to continue to next episode with 60-second timeout
                 if episode_num < num_episodes - 1:
                     console.print(f"\n[yellow]Episode {episode_num + 1} completed[/yellow]")
-                    if not Confirm.ask("Continue to next episode?", default=True):
+                    console.print(f"[cyan]💤 60-second break before next episode...[/cyan]")
+                    
+                    if not timeout_confirmation("Continue to next episode?", timeout_seconds=60, default=True):
                         console.print("[yellow]Training stopped by user[/yellow]")
                         break
         
