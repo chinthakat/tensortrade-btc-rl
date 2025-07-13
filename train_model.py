@@ -263,7 +263,7 @@ def get_training_parameters() -> Dict[str, Any]:
     # Leverage
     params['max_leverage'] = FloatPrompt.ask(
         "💪 Maximum leverage",
-        default=25.0,
+        default=5.0,  # Reduced from 25x to 5x for safer training
         show_default=True
     )
     
@@ -312,6 +312,13 @@ def get_training_parameters() -> Dict[str, Any]:
     params['n_envs'] = IntPrompt.ask(
         "🔄 Number of parallel environments",
         default=4,
+        show_default=True
+    )
+    
+    # Train/validation split
+    params['train_ratio'] = FloatPrompt.ask(
+        "📊 Training data ratio (0.7 = 70% train, 30% validation)",
+        default=0.7,
         show_default=True
     )
     
@@ -527,8 +534,37 @@ def load_data(file_path: str) -> pd.DataFrame:
         console.print(f"[red]❌ Error loading data: {str(e)}[/red]")
         return None
 
+def create_train_val_environments(df: pd.DataFrame, params: Dict[str, Any], log_file: str = None, training_iteration: int = 0, train_ratio: float = 0.7):
+    """Create separate training and validation environments with proper data splitting"""
+    
+    # Use the class method to create properly split environments
+    train_env, val_env = FuturesTradingEnv.create_train_val_environments(
+        df=df,
+        train_ratio=train_ratio,
+        val_ratio=0.3,  # Use remaining 30% for validation
+        initial_equity=params['initial_equity'],
+        max_leverage=params['max_leverage'],
+        window_size=params['window_size'],
+        stop_loss_pct=params['stop_loss_pct'],
+        take_profit_pct=params['take_profit_pct'],
+        maintenance_margin_rate=params['maintenance_margin_rate'],
+        liquidation_fee_rate=params['liquidation_fee_rate'],
+        log_file=log_file,
+        training_iteration=training_iteration,
+        use_advanced_action_space=True
+    )
+    
+    # Wrap both environments for algorithm compatibility
+    wrapped_train_env = wrap_environment_for_algorithm(train_env, "PPO")
+    wrapped_val_env = wrap_environment_for_algorithm(val_env, "PPO")
+    
+    console.print(f"📊 Training data: {len(train_env.df)} samples")
+    console.print(f"📊 Validation data: {len(val_env.df)} samples")
+    
+    return wrapped_train_env, wrapped_val_env
+
 def create_environment(df: pd.DataFrame, params: Dict[str, Any], log_file: str = None, training_iteration: int = 0):
-    """Create trading environment with specified parameters"""
+    """Create trading environment with specified parameters (legacy function for backward compatibility)"""
     env = FuturesTradingEnv(
         df=df,
         initial_equity=params['initial_equity'],
@@ -562,7 +598,8 @@ def create_vectorized_environment(env_fn, n_envs: int, hyperparams: Dict[str, An
             norm_reward=hyperparams.get('norm_reward', True),
             clip_obs=hyperparams.get('clip_obs', 10.0),
             clip_reward=hyperparams.get('clip_reward', 10.0),
-            gamma=hyperparams.get('gamma', 0.99)
+            gamma=hyperparams.get('gamma', 0.99),
+            training=True  # Enable training mode
         )
         
         console.print("✅ Environment normalization applied")
@@ -725,13 +762,14 @@ def load_config_from_file() -> Optional[Dict[str, Any]]:
 
 def train_model(
     model_class,
-    env_fn,
+    train_env_fn,
+    val_env_fn,
     model_config: Dict[str, Any],
     training_params: Dict[str, Any],
     hyperparams: Dict[str, Any],
     existing_model_path: Optional[str] = None
 ):
-    """Train the RL model"""
+    """Train the RL model with proper train/validation split"""
     console.print("\n[bold]🚀 Starting Training Process...[/bold]")
     
     # Create directories
@@ -739,9 +777,9 @@ def train_model(
     os.makedirs("logs", exist_ok=True)
     os.makedirs("tensorboard_logs", exist_ok=True)
     
-    # Setup vectorized environment with normalization
+    # Setup vectorized training environment with normalization
     with console.status("[bold green]Setting up training environment..."):
-        vec_env = create_vectorized_environment(env_fn, training_params['n_envs'], hyperparams)
+        train_vec_env = create_vectorized_environment(train_env_fn, training_params['n_envs'], hyperparams)
     
     # Policy kwargs
     policy_kwargs = {
@@ -753,7 +791,7 @@ def train_model(
     # Prepare algorithm-specific parameters
     algo_params = {
         "policy": "MultiInputPolicy",
-        "env": vec_env,
+        "env": train_vec_env,
         "policy_kwargs": policy_kwargs,
         "verbose": 1,
         "tensorboard_log": "./tensorboard_logs/",
@@ -791,7 +829,7 @@ def train_model(
     # Initialize or load model
     if existing_model_path and os.path.exists(existing_model_path):
         console.print(f"🔄 Loading existing model: [green]{existing_model_path}[/green]")
-        model = model_class[1]["class"].load(existing_model_path, env=vec_env)
+        model = model_class[1]["class"].load(existing_model_path, env=train_vec_env)
         # Update tensorboard log
         model.tensorboard_log = "./tensorboard_logs/"
     else:
@@ -801,21 +839,57 @@ def train_model(
     # Setup callbacks
     progress_callback = TradingProgressCallback(check_freq=1000)
     
-    # Create evaluation environment (without normalization for consistent evaluation)
-    eval_env = env_fn()
-    eval_env = Monitor(eval_env)
+    # Create evaluation environment - using proper validation data
+    console.print("📊 Setting up validation environment...")
     
-    eval_callback = EvalCallback(
-        eval_env,
-        best_model_save_path="./models/",
-        log_path="./logs/",
-        eval_freq=10000,
-        deterministic=True,
-        render=False
-    )
+    if hyperparams.get('use_normalization', False):
+        # Create validation environment with the same normalization settings but in evaluation mode
+        val_vec_env = make_vec_env(val_env_fn, n_envs=1)
+        val_vec_env = VecNormalize(
+            val_vec_env,
+            norm_obs=hyperparams.get('norm_obs', True),
+            norm_reward=hyperparams.get('norm_reward', True),
+            clip_obs=hyperparams.get('clip_obs', 10.0),
+            clip_reward=hyperparams.get('clip_reward', 10.0),
+            gamma=hyperparams.get('gamma', 0.99),
+            training=False  # Disable training for evaluation
+        )
+        
+        eval_callback = EvalCallback(
+            val_vec_env,
+            best_model_save_path="./models/",
+            log_path="./logs/",
+            eval_freq=10000,
+            deterministic=True,
+            render=False,
+            n_eval_episodes=5
+        )
+        
+        console.print("✅ Using normalized validation environment")
+        
+    else:
+        # Non-normalized validation environment
+        val_env = val_env_fn()
+        val_env = Monitor(val_env)
+        
+        eval_callback = EvalCallback(
+            val_env,
+            best_model_save_path="./models/",
+            log_path="./logs/",
+            eval_freq=10000,
+            deterministic=True,
+            render=False,
+            n_eval_episodes=5
+        )
+        
+        console.print("✅ Using standard validation environment")
     
     # Start training
     try:
+        # Synchronize normalization statistics between training and validation if needed
+        if hyperparams.get('use_normalization', False):
+            console.print("🔄 Training will auto-sync normalization statistics...")
+        
         model.learn(
             total_timesteps=training_params['total_timesteps'],
             callback=[progress_callback, eval_callback],
@@ -829,9 +903,9 @@ def train_model(
         model.save(model_path)
         
         # Save normalization statistics if used
-        if hyperparams.get('use_normalization', False) and hasattr(vec_env, 'save'):
+        if hyperparams.get('use_normalization', False) and hasattr(train_vec_env, 'save'):
             norm_path = f"models/{model_name}_vecnormalize.pkl"
-            vec_env.save(norm_path)
+            train_vec_env.save(norm_path)
             console.print(f"💾 Normalization stats saved to: [green]{norm_path}[/green]")
         
         console.print(f"\n✅ [bold green]Training completed successfully![/bold green]")
@@ -849,9 +923,9 @@ def train_model(
         console.print(f"💾 Model saved to: [green]{model_path}.zip[/green]")
         
         # Save normalization statistics if used
-        if hyperparams.get('use_normalization', False) and hasattr(vec_env, 'save'):
+        if hyperparams.get('use_normalization', False) and hasattr(train_vec_env, 'save'):
             norm_path = f"models/{model_name}_vecnormalize.pkl"
-            vec_env.save(norm_path)
+            train_vec_env.save(norm_path)
             console.print(f"💾 Normalization stats saved to: [green]{norm_path}[/green]")
         
         return model_path
@@ -950,14 +1024,35 @@ def main():
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         log_file = f"logs/trades_{timestamp}.csv"
         
-        # Create environment function
-        def env_fn():
-            return create_environment(
+        # Create train and validation environment functions with proper data splitting
+        console.print("\n[bold]📊 Creating training and validation environments...[/bold]")
+        
+        train_env, val_env = create_train_val_environments(
+            df=df,
+            params=training_params,
+            log_file=log_file,
+            training_iteration=0,
+            train_ratio=training_params.get('train_ratio', 0.7)
+        )
+        
+        # Create environment functions for training
+        def train_env_fn():
+            return create_train_val_environments(
                 df=df,
                 params=training_params,
                 log_file=log_file,
-                training_iteration=0
-            )
+                training_iteration=0,
+                train_ratio=training_params.get('train_ratio', 0.7)
+            )[0]  # Return only training environment
+            
+        def val_env_fn():
+            return create_train_val_environments(
+                df=df,
+                params=training_params,
+                log_file=log_file,
+                training_iteration=0,
+                train_ratio=training_params.get('train_ratio', 0.7)
+            )[1]  # Return only validation environment
         
         # Save configuration
         config = {
@@ -979,7 +1074,8 @@ def main():
         # Train the model
         model_path = train_model(
             model_class=algorithm_config,
-            env_fn=env_fn,
+            train_env_fn=train_env_fn,
+            val_env_fn=val_env_fn,
             model_config=model_config,
             training_params=training_params,
             hyperparams=hyperparams,
