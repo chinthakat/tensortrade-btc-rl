@@ -156,21 +156,8 @@ DataDownload/**/*.csv
 DataDownload/**/*.parquet
 DataDownload/**/*.feather
 
-# Model files and training artifacts
-models/*.pth
-models/*.pkl
-models/*.h5
-models/*.onnx
-models/*.pt
-models/*.zip
-models/*.joblib
-models/*.model
-models/*.bin
-models/*.pb
-models/*.tflite
-models/*.weights
-models/*.params
-models/*.safetensors
+# Model files and training artifacts - ignore everything in models folder
+models/*
 episodes/
 checkpoints/
 weights/
