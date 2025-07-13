@@ -24,53 +24,102 @@ class DictToBoxActionWrapper(gym.ActionWrapper):
         
         # Check if the environment uses advanced action space
         if hasattr(env, 'use_advanced_action_space') and env.use_advanced_action_space:
-            # Convert Dict action space to Box action space
-            # The wrapped action space will be Box(-1, 1, (2,)) for normalized actions
-            self.action_space = spaces.Box(
-                low=-1.0, 
-                high=1.0, 
-                shape=(2,), 
-                dtype=np.float32
-            )
-            
-            # Store original Dict action space bounds for conversion
-            self.leverage_low = -25.0
-            self.leverage_high = 25.0
-            self.risk_low = 0.01
-            self.risk_high = 1.0
-            
-            print("🔄 Action space wrapped: Dict → Box(2,) for PPO compatibility")
-            print(f"   Box action[0] → leverage [{self.leverage_low}, {self.leverage_high}]")
-            print(f"   Box action[1] → risk_percentage [{self.risk_low}, {self.risk_high}]")
-            
+            # Check if it's the new enhanced action space with action_type
+            if hasattr(env.action_space, 'spaces') and 'action_type' in env.action_space.spaces:
+                # New enhanced action space: action_type + leverage + risk_percentage
+                self.action_space = spaces.Box(
+                    low=-1.0, 
+                    high=1.0, 
+                    shape=(3,), 
+                    dtype=np.float32
+                )
+                
+                # Store original action space bounds for conversion
+                self.action_type_count = 4  # 0=HOLD, 1=BUY, 2=SELL, 3=CANCEL
+                self.leverage_low = 0.1
+                self.leverage_high = env.action_space.spaces['leverage'].high[0]
+                self.risk_low = 0.01
+                self.risk_high = 1.0
+                
+                print("🔄 Enhanced action space wrapped: Dict(3) → Box(3,) for PPO compatibility")
+                print(f"   Box action[0] → action_type [0-3] (HOLD/BUY/SELL/CANCEL)")
+                print(f"   Box action[1] → leverage [{self.leverage_low}, {self.leverage_high}]")
+                print(f"   Box action[2] → risk_percentage [{self.risk_low}, {self.risk_high}]")
+                
+                self.enhanced_actions = True
+            else:
+                # Legacy advanced action space: leverage + risk_percentage only
+                self.action_space = spaces.Box(
+                    low=-1.0, 
+                    high=1.0, 
+                    shape=(2,), 
+                    dtype=np.float32
+                )
+                
+                # Store original Dict action space bounds for conversion
+                self.leverage_low = -25.0
+                self.leverage_high = 25.0
+                self.risk_low = 0.01
+                self.risk_high = 1.0
+                
+                print("🔄 Action space wrapped: Dict → Box(2,) for PPO compatibility")
+                print(f"   Box action[0] → leverage [{self.leverage_low}, {self.leverage_high}]")
+                print(f"   Box action[1] → risk_percentage [{self.risk_low}, {self.risk_high}]")
+                
+                self.enhanced_actions = False
         else:
             # Environment uses simple action space, no wrapping needed
             print("✅ Simple action space detected, no wrapping needed")
+            self.enhanced_actions = False
     
     def action(self, action):
         """
         Convert Box action to Dict action for the environment.
         
         Args:
-            action: np.array of shape (2,) with values in [-1, 1]
+            action: np.array with values in [-1, 1]
+            - For enhanced actions: shape (3,) = [action_type, leverage, risk_percentage]
+            - For legacy actions: shape (2,) = [leverage, risk_percentage]
         
         Returns:
-            Dict action with 'leverage' and 'risk_percentage' keys
+            Dict action with appropriate keys
         """
         if hasattr(self.env, 'use_advanced_action_space') and self.env.use_advanced_action_space:
-            # Convert normalized action [-1, 1] to actual ranges
-            leverage = np.clip(action[0], -1.0, 1.0)
-            risk_norm = np.clip(action[1], -1.0, 1.0)
-            
-            # Map [-1, 1] to actual ranges
-            leverage_mapped = leverage * (self.leverage_high - self.leverage_low) / 2.0
-            # For risk_percentage, map [-1, 1] to [0.01, 1.0]
-            risk_mapped = (risk_norm + 1.0) / 2.0 * (self.risk_high - self.risk_low) + self.risk_low
-            
-            return {
-                'leverage': np.array([leverage_mapped], dtype=np.float32),
-                'risk_percentage': np.array([risk_mapped], dtype=np.float32)
-            }
+            if self.enhanced_actions:
+                # Enhanced action space: 3 parameters
+                action_type_norm = np.clip(action[0], -1.0, 1.0)
+                leverage_norm = np.clip(action[1], -1.0, 1.0)
+                risk_norm = np.clip(action[2], -1.0, 1.0)
+                
+                # Convert action_type from [-1, 1] to [0, 3] (discrete)
+                action_type = int((action_type_norm + 1.0) / 2.0 * (self.action_type_count - 1))
+                action_type = np.clip(action_type, 0, self.action_type_count - 1)
+                
+                # Convert leverage from [-1, 1] to [leverage_low, leverage_high]
+                leverage_mapped = (leverage_norm + 1.0) / 2.0 * (self.leverage_high - self.leverage_low) + self.leverage_low
+                
+                # Convert risk_percentage from [-1, 1] to [0.01, 1.0]
+                risk_mapped = (risk_norm + 1.0) / 2.0 * (self.risk_high - self.risk_low) + self.risk_low
+                
+                return {
+                    'action_type': action_type,  # Keep as scalar int
+                    'leverage': np.array([leverage_mapped], dtype=np.float32),
+                    'risk_percentage': np.array([risk_mapped], dtype=np.float32)
+                }
+            else:
+                # Legacy advanced action space: 2 parameters
+                leverage = np.clip(action[0], -1.0, 1.0)
+                risk_norm = np.clip(action[1], -1.0, 1.0)
+                
+                # Map [-1, 1] to actual ranges
+                leverage_mapped = leverage * (self.leverage_high - self.leverage_low) / 2.0
+                # For risk_percentage, map [-1, 1] to [0.01, 1.0]
+                risk_mapped = (risk_norm + 1.0) / 2.0 * (self.risk_high - self.risk_low) + self.risk_low
+                
+                return {
+                    'leverage': np.array([leverage_mapped], dtype=np.float32),
+                    'risk_percentage': np.array([risk_mapped], dtype=np.float32)
+                }
         else:
             # Pass through for simple action space
             return action

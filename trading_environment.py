@@ -460,7 +460,14 @@ class FuturesTradingEnv(gym.Env):
         if self.use_advanced_action_space:
             # Enhanced action space: Dict with action_type, leverage and risk_percentage
             if isinstance(action, dict):
-                action_type_idx = action['action_type'] if isinstance(action['action_type'], int) else action['action_type'][0]
+                action_type_raw = action['action_type']
+                if isinstance(action_type_raw, (int, np.integer)):
+                    action_type_idx = int(action_type_raw)
+                elif isinstance(action_type_raw, np.ndarray):
+                    action_type_idx = int(action_type_raw[0])
+                else:
+                    action_type_idx = int(action_type_raw)
+                
                 leverage = action['leverage'][0] if isinstance(action['leverage'], np.ndarray) else action['leverage']
                 risk_percentage = action['risk_percentage'][0] if isinstance(action['risk_percentage'], np.ndarray) else action['risk_percentage']
             else:
