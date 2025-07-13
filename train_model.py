@@ -29,6 +29,7 @@ from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.callbacks import BaseCallback, EvalCallback
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.logger import configure
+from stable_baselines3.common.vec_env import VecNormalize
 
 # Local imports
 from trading_environment import FuturesTradingEnv
@@ -262,7 +263,7 @@ def get_training_parameters() -> Dict[str, Any]:
     # Leverage
     params['max_leverage'] = FloatPrompt.ask(
         "💪 Maximum leverage",
-        default=25.0,
+        default=5.0,  # Reduced from 25x to 5x for safer training
         show_default=True
     )
     
@@ -313,6 +314,151 @@ def get_training_parameters() -> Dict[str, Any]:
         default=4,
         show_default=True
     )
+    
+    # Train/validation split
+    params['train_ratio'] = FloatPrompt.ask(
+        "📊 Training data ratio (0.7 = 70% train, 30% validation)",
+        default=0.7,
+        show_default=True
+    )
+    
+    return params
+
+def get_hyperparameters(algorithm: str) -> Dict[str, Any]:
+    """Get algorithm-specific hyperparameters from user"""
+    console.print(f"\n[bold]🎛️  {algorithm.upper()} Hyperparameters:[/bold]")
+    
+    params = {}
+    
+    # Common hyperparameters
+    params['learning_rate'] = FloatPrompt.ask(
+        "📈 Learning rate",
+        default=3e-4,
+        show_default=True
+    )
+    
+    params['batch_size'] = IntPrompt.ask(
+        "🎯 Batch size",
+        default=64,
+        show_default=True
+    )
+    
+    # Algorithm-specific parameters
+    if algorithm.lower() == "ppo":
+        params['n_steps'] = IntPrompt.ask(
+            "👣 Steps per environment per update",
+            default=2048,
+            show_default=True
+        )
+        
+        params['n_epochs'] = IntPrompt.ask(
+            "🔄 Training epochs per update",
+            default=10,
+            show_default=True
+        )
+        
+        params['clip_range'] = FloatPrompt.ask(
+            "✂️ PPO clip range",
+            default=0.2,
+            show_default=True
+        )
+        
+        params['gamma'] = FloatPrompt.ask(
+            "💰 Discount factor (gamma)",
+            default=0.99,
+            show_default=True
+        )
+        
+        params['gae_lambda'] = FloatPrompt.ask(
+            "🎯 GAE lambda",
+            default=0.95,
+            show_default=True
+        )
+        
+    elif algorithm.lower() == "a2c":
+        params['n_steps'] = IntPrompt.ask(
+            "👣 Steps per environment per update",
+            default=5,
+            show_default=True
+        )
+        
+        params['gamma'] = FloatPrompt.ask(
+            "💰 Discount factor (gamma)",
+            default=0.99,
+            show_default=True
+        )
+        
+        params['gae_lambda'] = FloatPrompt.ask(
+            "🎯 GAE lambda",
+            default=1.0,
+            show_default=True
+        )
+        
+        params['ent_coef'] = FloatPrompt.ask(
+            "🎲 Entropy coefficient",
+            default=0.0,
+            show_default=True
+        )
+        
+    elif algorithm.lower() == "sac":
+        params['buffer_size'] = IntPrompt.ask(
+            "📦 Replay buffer size",
+            default=1000000,
+            show_default=True
+        )
+        
+        params['train_freq'] = IntPrompt.ask(
+            "🚂 Training frequency",
+            default=1,
+            show_default=True
+        )
+        
+        params['gradient_steps'] = IntPrompt.ask(
+            "📈 Gradient steps per training",
+            default=1,
+            show_default=True
+        )
+        
+        params['tau'] = FloatPrompt.ask(
+            "🎯 Target network update rate (tau)",
+            default=0.005,
+            show_default=True
+        )
+        
+        params['gamma'] = FloatPrompt.ask(
+            "💰 Discount factor (gamma)",
+            default=0.99,
+            show_default=True
+        )
+    
+    # Ask about environment normalization
+    params['use_normalization'] = Confirm.ask(
+        "\n🔧 Use environment normalization? (Recommended for stable training)",
+        default=True
+    )
+    
+    if params['use_normalization']:
+        params['norm_obs'] = Confirm.ask(
+            "📊 Normalize observations?",
+            default=True
+        )
+        
+        params['norm_reward'] = Confirm.ask(
+            "🎁 Normalize rewards?",
+            default=True
+        )
+        
+        params['clip_obs'] = FloatPrompt.ask(
+            "✂️ Observation clipping value",
+            default=10.0,
+            show_default=True
+        )
+        
+        params['clip_reward'] = FloatPrompt.ask(
+            "🎁 Reward clipping value",
+            default=10.0,
+            show_default=True
+        )
     
     return params
 
@@ -388,8 +534,37 @@ def load_data(file_path: str) -> pd.DataFrame:
         console.print(f"[red]❌ Error loading data: {str(e)}[/red]")
         return None
 
+def create_train_val_environments(df: pd.DataFrame, params: Dict[str, Any], log_file: str = None, training_iteration: int = 0, train_ratio: float = 0.7):
+    """Create separate training and validation environments with proper data splitting"""
+    
+    # Use the class method to create properly split environments
+    train_env, val_env = FuturesTradingEnv.create_train_val_environments(
+        df=df,
+        train_ratio=train_ratio,
+        val_ratio=0.3,  # Use remaining 30% for validation
+        initial_equity=params['initial_equity'],
+        max_leverage=params['max_leverage'],
+        window_size=params['window_size'],
+        stop_loss_pct=params['stop_loss_pct'],
+        take_profit_pct=params['take_profit_pct'],
+        maintenance_margin_rate=params['maintenance_margin_rate'],
+        liquidation_fee_rate=params['liquidation_fee_rate'],
+        log_file=log_file,
+        training_iteration=training_iteration,
+        use_advanced_action_space=True
+    )
+    
+    # Wrap both environments for algorithm compatibility
+    wrapped_train_env = wrap_environment_for_algorithm(train_env, "PPO")
+    wrapped_val_env = wrap_environment_for_algorithm(val_env, "PPO")
+    
+    console.print(f"📊 Training data: {len(train_env.df)} samples")
+    console.print(f"📊 Validation data: {len(val_env.df)} samples")
+    
+    return wrapped_train_env, wrapped_val_env
+
 def create_environment(df: pd.DataFrame, params: Dict[str, Any], log_file: str = None, training_iteration: int = 0):
-    """Create trading environment with specified parameters"""
+    """Create trading environment with specified parameters (legacy function for backward compatibility)"""
     env = FuturesTradingEnv(
         df=df,
         initial_equity=params['initial_equity'],
@@ -408,24 +583,193 @@ def create_environment(df: pd.DataFrame, params: Dict[str, Any], log_file: str =
     wrapped_env = wrap_environment_for_algorithm(env, "PPO")
     return wrapped_env
 
-def save_config(config: Dict[str, Any], filename: str):
-    """Save training configuration"""
+def create_vectorized_environment(env_fn, n_envs: int, hyperparams: Dict[str, Any]) -> Any:
+    """Create vectorized environment with optional normalization"""
+    # Create vectorized environment
+    vec_env = make_vec_env(env_fn, n_envs=n_envs)
+    
+    # Apply normalization if requested
+    if hyperparams.get('use_normalization', False):
+        console.print("🔧 Applying environment normalization...")
+        
+        vec_env = VecNormalize(
+            vec_env,
+            norm_obs=hyperparams.get('norm_obs', True),
+            norm_reward=hyperparams.get('norm_reward', True),
+            clip_obs=hyperparams.get('clip_obs', 10.0),
+            clip_reward=hyperparams.get('clip_reward', 10.0),
+            gamma=hyperparams.get('gamma', 0.99),
+            training=True  # Enable training mode
+        )
+        
+        console.print("✅ Environment normalization applied")
+    
+    return vec_env
+
+def save_config(config: Dict[str, Any], filename: str = None, interactive: bool = True):
+    """Save training configuration with optional interactive naming"""
     os.makedirs("configs", exist_ok=True)
+    
+    if interactive and not filename:
+        # Ask user for a meaningful name
+        console.print("\n[bold]💾 Save Configuration:[/bold]")
+        
+        config_name = Prompt.ask(
+            "🏷️  Configuration name (for easy identification)",
+            default=f"{config.get('algorithm', 'unknown')}_{config.get('model_architecture', 'model')}"
+        )
+        
+        config_description = Prompt.ask(
+            "📝 Brief description (optional)",
+            default="Custom training configuration"
+        )
+        
+        # Add metadata to config
+        config['name'] = config_name
+        config['description'] = config_description
+        config['created_date'] = datetime.now().isoformat()
+        
+        # Clean filename
+        clean_name = "".join(c for c in config_name if c.isalnum() or c in (' ', '-', '_')).rstrip()
+        clean_name = clean_name.replace(' ', '_').lower()
+        filename = f"{clean_name}.json"
+    
+    elif not filename:
+        # Auto-generate filename with timestamp for non-interactive mode
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"training_session_{timestamp}.json"
+        config['auto_generated'] = True
+        config['created_date'] = datetime.now().isoformat()
+    
     config_path = f"configs/{filename}"
+    
+    # Ensure unique filename
+    counter = 1
+    original_path = config_path
+    while os.path.exists(config_path):
+        name, ext = os.path.splitext(original_path)
+        config_path = f"{name}_{counter}{ext}"
+        counter += 1
     
     with open(config_path, 'w') as f:
         json.dump(config, f, indent=2, default=str)
     
     console.print(f"💾 Configuration saved to: [green]{config_path}[/green]")
+    return config_path
+
+def load_model_with_normalization(model_path: str, env=None):
+    """Load a trained model along with its normalization statistics"""
+    from stable_baselines3 import PPO, A2C, SAC
+    
+    # Determine algorithm from filename
+    if "ppo" in model_path.lower():
+        model_class = PPO
+    elif "a2c" in model_path.lower():
+        model_class = A2C
+    elif "sac" in model_path.lower():
+        model_class = SAC
+    else:
+        # Default to PPO
+        model_class = PPO
+    
+    # Load the model
+    model = model_class.load(model_path, env=env)
+    
+    # Try to load normalization statistics
+    norm_path = model_path.replace('.zip', '_vecnormalize.pkl')
+    vec_normalize = None
+    
+    if os.path.exists(norm_path):
+        try:
+            vec_normalize = VecNormalize.load(norm_path, env)
+            console.print(f"✅ Loaded normalization stats from: [green]{norm_path}[/green]")
+        except Exception as e:
+            console.print(f"[yellow]⚠️  Could not load normalization stats: {str(e)}[/yellow]")
+    
+    return model, vec_normalize
+
+def load_config_from_file() -> Optional[Dict[str, Any]]:
+    """Load configuration from existing config file"""
+    configs_dir = Path("configs")
+    if not configs_dir.exists():
+        return None
+    
+    config_files = list(configs_dir.glob("*.json"))
+    if not config_files:
+        return None
+    
+    console.print("\n[bold]📁 Available Configuration Files:[/bold]")
+    
+    table = Table(title="Configuration Files")
+    table.add_column("Index", style="cyan", no_wrap=True)
+    table.add_column("Name", style="green")
+    table.add_column("Description", style="yellow")
+    table.add_column("Modified", style="magenta")
+    
+    config_info = []
+    for config_file in config_files:
+        try:
+            with open(config_file, 'r') as f:
+                config_data = json.load(f)
+            
+            name = config_data.get('name', config_file.stem)
+            description = config_data.get('description', 'No description')
+            use_case = config_data.get('use_case', '')
+            if use_case:
+                description = f"{description} - {use_case}"
+            
+            mod_time = datetime.fromtimestamp(config_file.stat().st_mtime)
+            config_info.append((config_file, name, description, mod_time))
+        except:
+            # Fallback for configs without name/description
+            mod_time = datetime.fromtimestamp(config_file.stat().st_mtime)
+            config_info.append((config_file, config_file.stem, "Legacy config", mod_time))
+    
+    # Sort by modification time (newest first)
+    config_info.sort(key=lambda x: x[3], reverse=True)
+    
+    for i, (config_file, name, description, mod_time) in enumerate(config_info):
+        table.add_row(
+            str(i+1), 
+            name, 
+            description[:60] + "..." if len(description) > 60 else description,
+            mod_time.strftime("%Y-%m-%d %H:%M")
+        )
+    
+    console.print(table)
+    
+    if Confirm.ask("\n📥 Load configuration from existing file?", default=False):
+        while True:
+            try:
+                choice = IntPrompt.ask(
+                    "🎯 Select config file (enter number)",
+                    default=1,
+                    show_default=True
+                )
+                if 1 <= choice <= len(config_info):
+                    selected_config = config_info[choice-1][0]
+                    with open(selected_config, 'r') as f:
+                        config = json.load(f)
+                    console.print(f"✅ Loaded config: [green]{config_info[choice-1][1]}[/green]")
+                    return config
+                else:
+                    console.print("[red]Invalid choice. Please try again.[/red]")
+            except KeyboardInterrupt:
+                console.print("\n[red]Cancelled by user[/red]")
+                break
+    
+    return None
 
 def train_model(
     model_class,
-    env_fn,
+    train_env_fn,
+    val_env_fn,
     model_config: Dict[str, Any],
     training_params: Dict[str, Any],
+    hyperparams: Dict[str, Any],
     existing_model_path: Optional[str] = None
 ):
-    """Train the RL model"""
+    """Train the RL model with proper train/validation split"""
     console.print("\n[bold]🚀 Starting Training Process...[/bold]")
     
     # Create directories
@@ -433,9 +777,9 @@ def train_model(
     os.makedirs("logs", exist_ok=True)
     os.makedirs("tensorboard_logs", exist_ok=True)
     
-    # Setup vectorized environment
+    # Setup vectorized training environment with normalization
     with console.status("[bold green]Setting up training environment..."):
-        vec_env = make_vec_env(env_fn, n_envs=training_params['n_envs'])
+        train_vec_env = create_vectorized_environment(train_env_fn, training_params['n_envs'], hyperparams)
     
     # Policy kwargs
     policy_kwargs = {
@@ -444,44 +788,108 @@ def train_model(
         "net_arch": [256, 128]  # Additional network layers
     }
     
+    # Prepare algorithm-specific parameters
+    algo_params = {
+        "policy": "MultiInputPolicy",
+        "env": train_vec_env,
+        "policy_kwargs": policy_kwargs,
+        "verbose": 1,
+        "tensorboard_log": "./tensorboard_logs/",
+        "learning_rate": hyperparams.get('learning_rate', 3e-4),
+        "batch_size": hyperparams.get('batch_size', 64),
+        "device": "auto"
+    }
+    
+    # Add algorithm-specific parameters
+    algorithm_name = model_class[0].lower()
+    if algorithm_name == "ppo":
+        algo_params.update({
+            "n_steps": hyperparams.get('n_steps', 2048),
+            "n_epochs": hyperparams.get('n_epochs', 10),
+            "clip_range": hyperparams.get('clip_range', 0.2),
+            "gamma": hyperparams.get('gamma', 0.99),
+            "gae_lambda": hyperparams.get('gae_lambda', 0.95)
+        })
+    elif algorithm_name == "a2c":
+        algo_params.update({
+            "n_steps": hyperparams.get('n_steps', 5),
+            "gamma": hyperparams.get('gamma', 0.99),
+            "gae_lambda": hyperparams.get('gae_lambda', 1.0),
+            "ent_coef": hyperparams.get('ent_coef', 0.0)
+        })
+    elif algorithm_name == "sac":
+        algo_params.update({
+            "buffer_size": hyperparams.get('buffer_size', 1000000),
+            "train_freq": hyperparams.get('train_freq', 1),
+            "gradient_steps": hyperparams.get('gradient_steps', 1),
+            "tau": hyperparams.get('tau', 0.005),
+            "gamma": hyperparams.get('gamma', 0.99)
+        })
+    
     # Initialize or load model
     if existing_model_path and os.path.exists(existing_model_path):
         console.print(f"🔄 Loading existing model: [green]{existing_model_path}[/green]")
-        model = model_class[1]["class"].load(existing_model_path, env=vec_env)
+        model = model_class[1]["class"].load(existing_model_path, env=train_vec_env)
         # Update tensorboard log
         model.tensorboard_log = "./tensorboard_logs/"
     else:
         console.print("🆕 Creating new model...")
-        model = model_class[1]["class"](
-            "MultiInputPolicy",
-            vec_env,
-            policy_kwargs=policy_kwargs,
-            verbose=1,
-            tensorboard_log="./tensorboard_logs/",
-            learning_rate=3e-4,
-            batch_size=64,
-            n_steps=2048 if model_class[0] == "ppo" else 256,
-            device="auto"
-        )
+        model = model_class[1]["class"](**algo_params)
     
     # Setup callbacks
     progress_callback = TradingProgressCallback(check_freq=1000)
     
-    # Create evaluation environment
-    eval_env = env_fn()
-    eval_env = Monitor(eval_env)
+    # Create evaluation environment - using proper validation data
+    console.print("📊 Setting up validation environment...")
     
-    eval_callback = EvalCallback(
-        eval_env,
-        best_model_save_path="./models/",
-        log_path="./logs/",
-        eval_freq=10000,
-        deterministic=True,
-        render=False
-    )
+    if hyperparams.get('use_normalization', False):
+        # Create validation environment with the same normalization settings but in evaluation mode
+        val_vec_env = make_vec_env(val_env_fn, n_envs=1)
+        val_vec_env = VecNormalize(
+            val_vec_env,
+            norm_obs=hyperparams.get('norm_obs', True),
+            norm_reward=hyperparams.get('norm_reward', True),
+            clip_obs=hyperparams.get('clip_obs', 10.0),
+            clip_reward=hyperparams.get('clip_reward', 10.0),
+            gamma=hyperparams.get('gamma', 0.99),
+            training=False  # Disable training for evaluation
+        )
+        
+        eval_callback = EvalCallback(
+            val_vec_env,
+            best_model_save_path="./models/",
+            log_path="./logs/",
+            eval_freq=10000,
+            deterministic=True,
+            render=False,
+            n_eval_episodes=5
+        )
+        
+        console.print("✅ Using normalized validation environment")
+        
+    else:
+        # Non-normalized validation environment
+        val_env = val_env_fn()
+        val_env = Monitor(val_env)
+        
+        eval_callback = EvalCallback(
+            val_env,
+            best_model_save_path="./models/",
+            log_path="./logs/",
+            eval_freq=10000,
+            deterministic=True,
+            render=False,
+            n_eval_episodes=5
+        )
+        
+        console.print("✅ Using standard validation environment")
     
     # Start training
     try:
+        # Synchronize normalization statistics between training and validation if needed
+        if hyperparams.get('use_normalization', False):
+            console.print("🔄 Training will auto-sync normalization statistics...")
+        
         model.learn(
             total_timesteps=training_params['total_timesteps'],
             callback=[progress_callback, eval_callback],
@@ -490,9 +898,15 @@ def train_model(
         
         # Save final model
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        model_name = f"trading_bot_{model_config[0]}_{timestamp}"
+        model_name = f"trading_bot_{model_config[0]}_{algorithm_name}_{timestamp}"
         model_path = f"models/{model_name}"
         model.save(model_path)
+        
+        # Save normalization statistics if used
+        if hyperparams.get('use_normalization', False) and hasattr(train_vec_env, 'save'):
+            norm_path = f"models/{model_name}_vecnormalize.pkl"
+            train_vec_env.save(norm_path)
+            console.print(f"💾 Normalization stats saved to: [green]{norm_path}[/green]")
         
         console.print(f"\n✅ [bold green]Training completed successfully![/bold green]")
         console.print(f"💾 Model saved to: [green]{model_path}.zip[/green]")
@@ -503,10 +917,17 @@ def train_model(
         console.print("\n[yellow]⚠️  Training interrupted by user[/yellow]")
         # Save current model state
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        model_name = f"trading_bot_interrupted_{timestamp}"
+        model_name = f"trading_bot_interrupted_{algorithm_name}_{timestamp}"
         model_path = f"models/{model_name}"
         model.save(model_path)
         console.print(f"💾 Model saved to: [green]{model_path}.zip[/green]")
+        
+        # Save normalization statistics if used
+        if hyperparams.get('use_normalization', False) and hasattr(train_vec_env, 'save'):
+            norm_path = f"models/{model_name}_vecnormalize.pkl"
+            train_vec_env.save(norm_path)
+            console.print(f"💾 Normalization stats saved to: [green]{norm_path}[/green]")
+        
         return model_path
         
     except Exception as e:
@@ -518,61 +939,146 @@ def main():
     display_welcome()
     
     try:
-        # Step 1: Select data file
-        data_file = select_data_file()
-        if not data_file:
-            return
+        # Check if user wants to load from config file
+        loaded_config = load_config_from_file()
         
-        # Step 2: Load and validate data
+        if loaded_config:
+            # Use loaded configuration
+            data_file = loaded_config.get('data_file')
+            model_architecture = loaded_config.get('model_architecture')
+            algorithm = loaded_config.get('algorithm')
+            training_params = loaded_config.get('training_params', {})
+            hyperparams = loaded_config.get('hyperparameters', {})
+            
+            # Validate loaded data
+            if not data_file or not os.path.exists(data_file):
+                console.print(f"[red]❌ Data file not found: {data_file}[/red]")
+                data_file = select_data_file()
+                if not data_file:
+                    return
+            
+            # Find model and algorithm configs
+            model_config = None
+            algorithm_config = None
+            
+            for key, model_info in ModelConfig.AVAILABLE_MODELS.items():
+                if key == model_architecture:
+                    model_config = (key, model_info)
+                    break
+            
+            for key, algo_info in ModelConfig.AVAILABLE_ALGORITHMS.items():
+                if key == algorithm:
+                    algorithm_config = (key, algo_info)
+                    break
+            
+            if not model_config:
+                console.print(f"[yellow]⚠️  Model architecture '{model_architecture}' not found, selecting manually[/yellow]")
+                model_config = select_model_architecture()
+                if not model_config:
+                    return
+            
+            if not algorithm_config:
+                console.print(f"[yellow]⚠️  Algorithm '{algorithm}' not found, selecting manually[/yellow]")
+                algorithm_config = select_algorithm()
+                if not algorithm_config:
+                    return
+            
+            console.print(f"✅ Using loaded configuration with {algorithm_config[1]['name']} and {model_config[1]['name']}")
+            
+        else:
+            # Interactive configuration
+            # Step 1: Select data file
+            data_file = select_data_file()
+            if not data_file:
+                return
+            
+            # Step 2: Check for existing models
+            existing_model = check_existing_models()
+            
+            # Step 3: Select model architecture
+            model_config = select_model_architecture()
+            if not model_config:
+                return
+            
+            # Step 4: Select RL algorithm
+            algorithm_config = select_algorithm()
+            if not algorithm_config:
+                return
+            
+            # Step 5: Get training parameters
+            training_params = get_training_parameters()
+            
+            # Step 6: Get hyperparameters
+            hyperparams = get_hyperparameters(algorithm_config[0])
+        
+        # Load and validate data
         df = load_data(data_file)
         if df is None:
             return
         
-        # Step 3: Check for existing models
-        existing_model = check_existing_models()
+        # Check for existing models (if not already done)
+        if 'existing_model' not in locals():
+            existing_model = check_existing_models()
         
-        # Step 4: Select model architecture
-        model_config = select_model_architecture()
-        if not model_config:
-            return
-        
-        # Step 5: Select RL algorithm
-        algorithm_config = select_algorithm()
-        if not algorithm_config:
-            return
-        
-        # Step 6: Get training parameters
-        training_params = get_training_parameters()
-        
-        # Step 7: Setup logging
+        # Setup logging
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         log_file = f"logs/trades_{timestamp}.csv"
         
-        # Create environment function
-        def env_fn():
-            return create_environment(
+        # Create train and validation environment functions with proper data splitting
+        console.print("\n[bold]📊 Creating training and validation environments...[/bold]")
+        
+        train_env, val_env = create_train_val_environments(
+            df=df,
+            params=training_params,
+            log_file=log_file,
+            training_iteration=0,
+            train_ratio=training_params.get('train_ratio', 0.7)
+        )
+        
+        # Create environment functions for training
+        def train_env_fn():
+            return create_train_val_environments(
                 df=df,
                 params=training_params,
                 log_file=log_file,
-                training_iteration=0
-            )
+                training_iteration=0,
+                train_ratio=training_params.get('train_ratio', 0.7)
+            )[0]  # Return only training environment
+            
+        def val_env_fn():
+            return create_train_val_environments(
+                df=df,
+                params=training_params,
+                log_file=log_file,
+                training_iteration=0,
+                train_ratio=training_params.get('train_ratio', 0.7)
+            )[1]  # Return only validation environment
         
-        # Step 8: Save configuration
+        # Save configuration
         config = {
             "data_file": data_file,
             "model_architecture": model_config[0],
             "algorithm": algorithm_config[0],
             "training_params": training_params,
+            "hyperparameters": hyperparams,
             "timestamp": timestamp
         }
-        save_config(config, f"config_{timestamp}.json")
         
-        # Step 9: Train the model
+        # Ask if user wants to save this configuration for future use
+        if Confirm.ask("\n💾 Save this configuration for future use?", default=True):
+            save_config(config, interactive=True)
+        else:
+            # Save with auto-generated name for session tracking
+            save_config(config, interactive=False)
+        
+        # Train the model
         model_path = train_model(
             model_class=algorithm_config,
-            env_fn=env_fn,
+            train_env_fn=train_env_fn,
+            val_env_fn=val_env_fn,
             model_config=model_config,
             training_params=training_params,
+            hyperparams=hyperparams,
             existing_model_path=existing_model
         )
         
@@ -581,6 +1087,17 @@ def main():
             console.print(f"📊 Trade log: [blue]{log_file}[/blue]")
             console.print(f"📈 TensorBoard logs: [blue]tensorboard_logs/[/blue]")
             console.print("\n[yellow]Run 'tensorboard --logdir=tensorboard_logs' to view training progress[/yellow]")
+            
+            # Display hyperparameter summary
+            console.print("\n[bold]📋 Hyperparameters Used:[/bold]")
+            hp_table = Table(title="Final Hyperparameters")
+            hp_table.add_column("Parameter", style="cyan")
+            hp_table.add_column("Value", style="green")
+            
+            for key, value in hyperparams.items():
+                hp_table.add_row(key, str(value))
+            
+            console.print(hp_table)
         
     except KeyboardInterrupt:
         console.print("\n[red]❌ Program interrupted by user[/red]")

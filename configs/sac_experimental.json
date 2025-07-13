@@ -1,0 +1,34 @@
+{
+  "name": "SAC Experimental",
+  "description": "SAC algorithm for continuous action space experimentation",
+  "data_file": "data/BTC_SYNTHETIC_MIXED_15m_2024-01-01_to_2024-12-31.csv",
+  "model_architecture": "resnet_lstm",
+  "algorithm": "sac",
+  "training_params": {
+    "total_timesteps": 1500000,
+    "max_leverage": 10.0,
+    "initial_equity": 10000.0,
+    "window_size": 60,
+    "stop_loss_pct": 0.02,
+    "take_profit_pct": 0.04,
+    "maintenance_margin_rate": 0.004,
+    "liquidation_fee_rate": 0.005,
+    "n_envs": 4,
+    "train_ratio": 0.7
+  },
+  "hyperparameters": {
+    "learning_rate": 3e-4,
+    "batch_size": 256,
+    "buffer_size": 1000000,
+    "train_freq": 1,
+    "gradient_steps": 1,
+    "tau": 0.005,
+    "gamma": 0.99,
+    "use_normalization": true,
+    "norm_obs": true,
+    "norm_reward": false,
+    "clip_obs": 10.0,
+    "clip_reward": 10.0
+  },
+  "use_case": "Experimental continuous action space trading"
+}
