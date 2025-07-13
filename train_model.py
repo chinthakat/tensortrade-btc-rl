@@ -35,6 +35,7 @@ from stable_baselines3.common.vec_env import VecNormalize
 from trading_environment import FuturesTradingEnv
 from model_architectures import CNNLSTMFeatureExtractor, AttentionCNNLSTMExtractor, ResNetLSTMExtractor
 from action_space_wrapper import DictToBoxActionWrapper, wrap_environment_for_algorithm
+from log_archiver import archive_startup_logs
 
 console = Console()
 
@@ -937,6 +938,19 @@ def train_model(
 def main():
     """Main training function"""
     display_welcome()
+    
+    # Archive old logs before starting training
+    console.print("[bold]🗂️  Archiving old logs before training...[/bold]")
+    try:
+        archive_startup_logs(
+            base_dir=".",
+            log_age_days=2,      # More aggressive for training sessions
+            model_age_days=10,   # Keep fewer old models
+            tensorboard_age_days=5
+        )
+    except Exception as e:
+        console.print(f"[yellow]⚠️  Log archiving failed: {str(e)}[/yellow]")
+        console.print("[yellow]Continuing with training startup...[/yellow]")
     
     try:
         # Check if user wants to load from config file

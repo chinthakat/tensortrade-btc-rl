@@ -18,6 +18,9 @@ from rich import print as rprint
 current_dir = Path(__file__).parent
 sys.path.append(str(current_dir))
 
+# Import log archiver
+from log_archiver import archive_startup_logs
+
 console = Console()
 
 def display_main_menu():
@@ -40,8 +43,9 @@ def display_main_menu():
         ("4", "📈 Live Trading (Testnet/Live)"),
         ("5", "🔧 Data Preprocessing"),
         ("6", "📋 View Training History"),
-        ("7", "❓ Help & Documentation"),
-        ("8", "❌ Exit")
+        ("7", "🗂️ Archive Old Logs"),
+        ("8", "❓ Help & Documentation"),
+        ("9", "❌ Exit")
     ]
     
     for option, description in menu_options:
@@ -405,10 +409,155 @@ def show_help():
     
     console.print(Panel(help_text, title="Help & Documentation", border_style="blue"))
 
+def archive_logs_menu():
+    """Interactive log archiving menu"""
+    console.print("\n[bold]🗂️ Log Archiving Options[/bold]")
+    
+    # Show current log status
+    from pathlib import Path
+    logs_dir = Path("logs")
+    models_dir = Path("models") 
+    tensorboard_dir = Path("tensorboard_logs")
+    archive_dir = Path("archive")
+    
+    # Count current files
+    log_files = list(logs_dir.glob("*.csv")) + list(logs_dir.glob("*.log")) + list(logs_dir.glob("*.npz")) if logs_dir.exists() else []
+    model_files = list(models_dir.glob("*.zip")) + list(models_dir.glob("*.pkl")) if models_dir.exists() else []
+    tb_dirs = [d for d in tensorboard_dir.iterdir() if d.is_dir()] if tensorboard_dir.exists() else []
+    archive_files = list(archive_dir.glob("*.zip")) if archive_dir.exists() else []
+    
+    # Display current status
+    status_table = Table(title="Current File Status")
+    status_table.add_column("Type", style="cyan")
+    status_table.add_column("Count", style="green")
+    status_table.add_column("Location", style="yellow")
+    
+    status_table.add_row("Log Files", str(len(log_files)), "logs/")
+    status_table.add_row("Model Files", str(len(model_files)), "models/")
+    status_table.add_row("TensorBoard Dirs", str(len(tb_dirs)), "tensorboard_logs/")
+    status_table.add_row("Archives", str(len(archive_files)), "archive/")
+    
+    console.print(status_table)
+    
+    # Archive options
+    archive_table = Table(title="Archive Options")
+    archive_table.add_column("Option", style="cyan", no_wrap=True, width=4)
+    archive_table.add_column("Description", style="white")
+    
+    archive_options = [
+        ("1", "🗂️ Archive All (Automatic Settings)"),
+        ("2", "📊 Archive Logs Only"),
+        ("3", "🤖 Archive Models Only"),
+        ("4", "📈 Archive TensorBoard Only"),
+        ("5", "⚡ Quick Archive (1 day old files)"),
+        ("6", "🗑️ Archive Everything (All files)"),
+        ("7", "📋 View Archive Contents"),
+        ("8", "🔙 Back to Main Menu")
+    ]
+    
+    for option, description in archive_options:
+        archive_table.add_row(option, description)
+    
+    console.print(archive_table)
+    
+    choice = IntPrompt.ask("\nSelect archive option", default=8)
+    
+    try:
+        if choice == 1:
+            # Standard archiving with config settings
+            console.print("[bold]🗂️ Running standard archiving...[/bold]")
+            success = archive_startup_logs(base_dir=".")
+            if success:
+                console.print("[green]✅ Archiving completed successfully![/green]")
+            else:
+                console.print("[red]❌ Archiving had some issues[/red]")
+                
+        elif choice == 2:
+            # Archive logs only
+            console.print("[bold]📊 Archiving logs only...[/bold]")
+            from log_archiver import LogArchiver
+            archiver = LogArchiver(".")
+            success = archiver.archive_logs()
+            if success:
+                console.print("[green]✅ Log archiving completed![/green]")
+            
+        elif choice == 3:
+            # Archive models only
+            console.print("[bold]🤖 Archiving models only...[/bold]")
+            from log_archiver import LogArchiver
+            archiver = LogArchiver(".")
+            success = archiver.archive_old_models()
+            if success:
+                console.print("[green]✅ Model archiving completed![/green]")
+            
+        elif choice == 4:
+            # Archive TensorBoard only
+            console.print("[bold]📈 Archiving TensorBoard logs only...[/bold]")
+            from log_archiver import LogArchiver
+            archiver = LogArchiver(".")
+            success = archiver.archive_tensorboard_logs()
+            if success:
+                console.print("[green]✅ TensorBoard archiving completed![/green]")
+            
+        elif choice == 5:
+            # Quick archive (1 day old)
+            console.print("[bold]⚡ Quick archive (1 day old files)...[/bold]")
+            success = archive_startup_logs(
+                base_dir=".",
+                log_age_days=1,
+                model_age_days=1, 
+                tensorboard_age_days=1
+            )
+            if success:
+                console.print("[green]✅ Quick archiving completed![/green]")
+            
+        elif choice == 6:
+            # Archive everything (0 days = all files)
+            if Confirm.ask("[red]⚠️ This will archive ALL files. Continue?[/red]"):
+                console.print("[bold]🗑️ Archiving all files...[/bold]")
+                from log_archiver import LogArchiver
+                archiver = LogArchiver(".")
+                success = archiver.archive_everything_now()
+                if success:
+                    console.print("[green]✅ Complete archiving finished![/green]")
+            else:
+                console.print("[yellow]Archive cancelled[/yellow]")
+                
+        elif choice == 7:
+            # View archive contents
+            console.print("\n[bold]📋 Archive Contents:[/bold]")
+            if archive_files:
+                for archive_file in sorted(archive_files, reverse=True):  # Newest first
+                    file_size = archive_file.stat().st_size / 1024  # KB
+                    mod_time = datetime.fromtimestamp(archive_file.stat().st_mtime)
+                    console.print(f"  📦 {archive_file.name}")
+                    console.print(f"     Size: {file_size:.1f} KB | Created: {mod_time.strftime('%Y-%m-%d %H:%M')}")
+            else:
+                console.print("  [yellow]No archive files found[/yellow]")
+                
+        elif choice == 8:
+            return
+            
+        # Pause before returning to menu
+        if choice != 8:
+            input("\nPress Enter to continue...")
+            
+    except Exception as e:
+        console.print(f"[red]❌ Error during archiving: {str(e)}[/red]")
+        input("\nPress Enter to continue...")
+
 def main():
     """Main application loop"""
     # Clear screen and show welcome
     os.system('cls' if os.name == 'nt' else 'clear')
+    
+    # Archive old logs before starting
+    console.print("[bold]🗂️  Checking for old logs to archive...[/bold]")
+    try:
+        archive_startup_logs(base_dir=".")
+    except Exception as e:
+        console.print(f"[yellow]⚠️  Log archiving failed: {str(e)}[/yellow]")
+        console.print("[yellow]Continuing with normal startup...[/yellow]")
     
     # Check dependencies
     if not check_dependencies():
@@ -424,7 +573,7 @@ def main():
             if not data_available:
                 console.print("[yellow]⚠️  No data files found. Consider using option 5 to download data.[/yellow]")
             
-            choice = IntPrompt.ask("Select an option", default=8)
+            choice = IntPrompt.ask("Select an option", default=9)
             
             if choice == 1:
                 if not data_available:
@@ -446,8 +595,10 @@ def main():
             elif choice == 6:
                 view_training_history()
             elif choice == 7:
-                show_help()
+                archive_logs_menu()
             elif choice == 8:
+                show_help()
+            elif choice == 9:
                 console.print("[bold green]👋 Thank you for using the Trading Bot![/bold green]")
                 console.print("[yellow]⚠️  Remember: Trading involves risk. Trade responsibly![/yellow]")
                 break
@@ -455,7 +606,7 @@ def main():
                 console.print("[red]❌ Invalid option. Please try again.[/red]")
             
             # Pause before showing menu again
-            if choice != 8:
+            if choice != 9:
                 console.print("\n[dim]Press Enter to continue...[/dim]")
                 input()
                 os.system('cls' if os.name == 'nt' else 'clear')
