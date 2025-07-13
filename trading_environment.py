@@ -421,6 +421,9 @@ class FuturesTradingEnv(gym.Env):
         self.total_fees = 0.0
         self.total_funding_costs = 0.0
         
+        # Reward tracking for trades
+        self.current_trade_reward = 0.0
+        
         # Performance tracking
         self.equity_history = deque(maxlen=1000)
         self.returns_history = deque(maxlen=252)  # 1 year of daily returns
@@ -436,6 +439,10 @@ class FuturesTradingEnv(gym.Env):
         self.total_realized_pnl = 0.0
         self.balance_trend_slope = 0.0  # Track if balance is declining
         
+        # Drawdown tracking flags
+        self.severe_drawdown_triggered = False
+        self.moderate_drawdown_triggered = False
+        
         # Action tracking for enhanced rewards
         self.last_action_type = "HOLD"
         self.hold_streak = 0
@@ -444,11 +451,7 @@ class FuturesTradingEnv(gym.Env):
         # Action type statistics
         self.action_type_counts = {"HOLD": 0, "BUY": 0, "SELL": 0, "CANCEL": 0}
         
-        # Risk management flags
-        self.severe_drawdown_triggered = False
-        self.moderate_drawdown_triggered = False
-        
-        # Episode tracking
+        # Episode statistics
         self.episode_trades = 0
         self.episode_profit = 0.0
         
@@ -638,6 +641,12 @@ class FuturesTradingEnv(gym.Env):
         
         # Calculate reward with enhanced risk management
         reward = self._calculate_enhanced_reward(prev_equity)
+        
+        # Store reward for current trade (if position is open)
+        if self.position_size != 0:
+            if not hasattr(self, 'current_trade_reward'):
+                self.current_trade_reward = 0.0
+            self.current_trade_reward += reward
         
         # Move to next step
         self.current_step += 1
@@ -838,6 +847,8 @@ class FuturesTradingEnv(gym.Env):
                 self.trade_id += 1
                 self.trade_start_step = self.current_step
                 self.entry_equity = self.equity
+                # Reset reward accumulation for new trade
+                self.current_trade_reward = 0.0
             
             # Update margin and risk management
             self.margin_used = abs(self.position_size * current_price) / self.leverage if self.leverage > 0 else 0
@@ -1066,6 +1077,9 @@ class FuturesTradingEnv(gym.Env):
         self.take_profit_price = None
         self.liquidation_price = None
         
+        # Reset trade reward accumulation
+        self.current_trade_reward = 0.0
+        
         # Update episode stats
         # Note: episode_trades is now counted in _execute_efficient_trade
         self.episode_profit += pnl
@@ -1099,7 +1113,7 @@ class FuturesTradingEnv(gym.Env):
             'entry_price': self.entry_price,
             'close_price': exit_price,
             'net_pnl': pnl,
-            'close_reward': 0.0,  # Will be updated by reward function
+            'close_reward': getattr(self, 'current_trade_reward', 0.0),  # Actual cumulative reward for this trade
             'entry_net_worth': self.entry_equity,
             'close_net_worth': self.equity,
             'trade_duration_hours': duration_hours,
@@ -1111,7 +1125,6 @@ class FuturesTradingEnv(gym.Env):
             'take_profit_price': self.take_profit_price or 0.0,
             'close_reason': reason
         }
-        
         self.logger.log_trade(trade_data)
         self.trade_id += 1
     
