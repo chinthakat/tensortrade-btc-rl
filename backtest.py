@@ -23,6 +23,21 @@ from trading_environment import FuturesTradingEnv, TradingMetrics
 from model_architectures import CNNLSTMFeatureExtractor, AttentionCNNLSTMExtractor, ResNetLSTMExtractor
 from action_space_wrapper import wrap_environment_for_algorithm
 
+class NumpyEncoder(json.JSONEncoder):
+    """Custom JSON encoder for NumPy types"""
+    def default(self, obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, pd.Timestamp):
+            return obj.isoformat()
+        elif pd.isna(obj):
+            return None
+        return super().default(obj)
+
 console = Console()
 
 class TradingBacktester:
@@ -404,7 +419,7 @@ class TradingBacktester:
             <p>{self._classify_performance()}</p>
             
             <h2>⚙️ Configuration</h2>
-            <pre>{json.dumps(self.config, indent=2)}</pre>
+            <pre>{json.dumps(self.config, indent=2, cls=NumpyEncoder)}</pre>
         </body>
         </html>
         """
