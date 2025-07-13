@@ -266,6 +266,10 @@ class FuturesTradingEnv(gym.Env):
         self.last_action_type = "HOLD"  # Track last action for reward calculation
         self.hold_streak = 0  # Count consecutive holds
         self.trade_streak = 0  # Count consecutive trades
+        
+        # Action type statistics
+        self.action_type_counts = {"HOLD": 0, "BUY": 0, "SELL": 0, "CANCEL": 0}
+        self.action_log_interval = 1000  # Log action stats every N steps
     
     def _prepare_features(self, training_end_idx: Optional[int] = None):
         """
@@ -437,6 +441,9 @@ class FuturesTradingEnv(gym.Env):
         self.hold_streak = 0
         self.trade_streak = 0
         
+        # Action type statistics
+        self.action_type_counts = {"HOLD": 0, "BUY": 0, "SELL": 0, "CANCEL": 0}
+        
         # Risk management flags
         self.severe_drawdown_triggered = False
         self.moderate_drawdown_triggered = False
@@ -516,6 +523,39 @@ class FuturesTradingEnv(gym.Env):
         
         # Store action type for reward calculation
         self.last_action_type = action_type
+        
+        # Count action types for statistics
+        if action_type in self.action_type_counts:
+            self.action_type_counts[action_type] += 1
+        
+        # Log action statistics periodically
+        if hasattr(self, 'logger') and self.logger and self.current_step % self.action_log_interval == 0:
+            total_actions = sum(self.action_type_counts.values())
+            if total_actions > 0:
+                action_stats = {
+                    'trade_id': f"ACTION_STATS_{self.current_step}",
+                    'training_step': self.current_step,
+                    'training_iteration': getattr(self, 'training_iteration', 0),
+                    'entry_datetime': self.df.iloc[self.current_step]['timestamp'] if self.current_step < len(self.df) else f"step_{self.current_step}",
+                    'close_datetime': '',
+                    'side': f"HOLD:{self.action_type_counts['HOLD']}/{total_actions}",
+                    'entry_action': f"BUY:{self.action_type_counts['BUY']} SELL:{self.action_type_counts['SELL']} CANCEL:{self.action_type_counts['CANCEL']}",
+                    'entry_price': 0,
+                    'close_price': '',
+                    'net_pnl': 0,
+                    'close_reward': 0,
+                    'entry_net_worth': self.equity,
+                    'close_net_worth': self.equity,
+                    'trade_duration_hours': 0,
+                    'status': f"Total actions: {total_actions}",
+                    'win_loss': 'ACTION_SUMMARY',
+                    'position_size': 0,
+                    'fees_paid': 0,
+                    'stop_loss_price': '',
+                    'take_profit_price': '',
+                    'close_reason': f"HOLD:{self.action_type_counts['HOLD']/total_actions:.1%}"
+                }
+                self.logger.log_trade(action_stats)
         
         # Update action streaks
         if action_type == "HOLD":
