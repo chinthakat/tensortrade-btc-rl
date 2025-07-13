@@ -59,7 +59,7 @@ class LogArchiver:
         
     def archive_logs(self, max_age_days: int = 7, keep_latest: int = 3) -> bool:
         """
-        Archive old log files
+        Archive old log files including episode logs
         
         Args:
             max_age_days: Archive files older than this many days
@@ -75,15 +75,39 @@ class LogArchiver:
             archive_name = f"logs_archive_{timestamp}.zip"
             archive_path = self.archive_dir / archive_name
             
-            # Get all log files
-            log_files = self._get_files_to_archive(
+            # Get all log files from main logs directory
+            main_log_files = self._get_files_to_archive(
                 self.logs_dir, 
                 patterns=["*.csv", "*.log", "*.npz"],
                 max_age_days=max_age_days,
                 keep_latest=keep_latest
             )
             
-            if not log_files:
+            # Get episode log files
+            episodes_dir = self.base_dir / "episodes"
+            episode_log_files = []
+            
+            if episodes_dir.exists():
+                # Find all episode directories
+                episode_dirs = [d for d in episodes_dir.iterdir() if d.is_dir()]
+                
+                # Get episode directories to archive based on age
+                old_episode_dirs = self._get_dirs_to_archive(
+                    episodes_dir,
+                    max_age_days=max_age_days,
+                    keep_latest=keep_latest
+                )
+                
+                # Collect all log files from old episode directories
+                for episode_dir in old_episode_dirs:
+                    episode_logs_dir = episode_dir / "logs"
+                    if episode_logs_dir.exists():
+                        for pattern in ["*.csv", "*.log", "*.npz"]:
+                            episode_log_files.extend(episode_logs_dir.glob(pattern))
+            
+            all_log_files = main_log_files + episode_log_files
+            
+            if not all_log_files:
                 console.print("[green]✅ No old logs to archive[/green]")
                 return True
                 
@@ -93,10 +117,10 @@ class LogArchiver:
                 TextColumn("[progress.description]{task.description}"),
                 console=console
             ) as progress:
-                task = progress.add_task("Creating log archive...", total=len(log_files))
+                task = progress.add_task("Creating log archive...", total=len(all_log_files))
                 
                 with zipfile.ZipFile(archive_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                    for file_path in log_files:
+                    for file_path in all_log_files:
                         # Calculate relative path for archive
                         rel_path = file_path.relative_to(self.base_dir)
                         zipf.write(file_path, rel_path)
@@ -104,8 +128,27 @@ class LogArchiver:
                         
                         # Remove original file after archiving
                         file_path.unlink()
+                
+                # Clean up empty episode directories
+                episodes_dir = self.base_dir / "episodes"
+                if episodes_dir.exists():
+                    old_episode_dirs = self._get_dirs_to_archive(
+                        episodes_dir,
+                        max_age_days=max_age_days,
+                        keep_latest=keep_latest
+                    )
+                    
+                    # Remove episode directories that we archived
+                    for episode_dir in old_episode_dirs:
+                        try:
+                            # Remove the entire episode directory
+                            import shutil
+                            shutil.rmtree(episode_dir)
+                            console.print(f"[yellow]🗑️ Removed episode directory:[/yellow] [blue]{episode_dir.name}[/blue]")
+                        except Exception as e:
+                            console.print(f"[red]⚠️ Could not remove episode directory {episode_dir.name}: {str(e)}[/red]")
                         
-            console.print(f"[green]✅ Archived {len(log_files)} log files to:[/green] [blue]{archive_path}[/blue]")
+            console.print(f"[green]✅ Archived {len(all_log_files)} log files to:[/green] [blue]{archive_path}[/blue]")
             return True
             
         except Exception as e:

@@ -443,6 +443,18 @@ def archive_logs_menu():
     tb_dirs = [d for d in tensorboard_dir.iterdir() if d.is_dir()] if tensorboard_dir.exists() else []
     archive_files = list(archive_dir.glob("*.zip")) if archive_dir.exists() else []
     
+    # Count episode logs
+    episodes_dir = Path("episodes")
+    episode_log_files = []
+    episode_dirs = []
+    if episodes_dir.exists():
+        episode_dirs = [d for d in episodes_dir.iterdir() if d.is_dir()]
+        for episode_dir in episode_dirs:
+            episode_logs_dir = episode_dir / "logs"
+            if episode_logs_dir.exists():
+                for pattern in ["*.csv", "*.log", "*.npz"]:
+                    episode_log_files.extend(episode_logs_dir.glob(pattern))
+    
     # Display current status
     status_table = Table(title="Current File Status")
     status_table.add_column("Type", style="cyan")
@@ -450,6 +462,7 @@ def archive_logs_menu():
     status_table.add_column("Location", style="yellow")
     
     status_table.add_row("Log Files", str(len(log_files)), "logs/")
+    status_table.add_row("Episode Logs", str(len(episode_log_files)), f"episodes/ ({len(episode_dirs)} dirs)")
     status_table.add_row("Model Files", str(len(model_files)), "models/")
     status_table.add_row("TensorBoard Dirs", str(len(tb_dirs)), "tensorboard_logs/")
     status_table.add_row("Archives", str(len(archive_files)), "archive/")
@@ -463,11 +476,11 @@ def archive_logs_menu():
     
     archive_options = [
         ("1", "🗂️ Archive All (Automatic Settings)"),
-        ("2", "📊 Archive Logs Only"),
+        ("2", "📊 Archive Logs Only (includes episode logs)"),
         ("3", "🤖 Archive Models Only"),
         ("4", "📈 Archive TensorBoard Only"),
         ("5", "⚡ Quick Archive (1 day old files)"),
-        ("6", "🗑️ Archive Everything (All files)"),
+        ("6", "🗑️ Archive Everything (All files including episodes)"),
         ("7", "📋 View Archive Contents"),
         ("8", "❌ Cancel"),
         ("9", "🔙 Back to Main Menu")
