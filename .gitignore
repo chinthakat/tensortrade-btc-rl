@@ -281,3 +281,14 @@ config.json
 
 # Keep empty directories with .gitkeep
 !**/.gitkeep
+
+# DATA_ANALYSIS specific ignores
+# =============================
+
+# Ignore all subfolders in DATA_ANALYSIS (logs, reports, cache, etc.)
+DATA_ANALYSIS/*/
+
+# Keep Python source files and documentation in DATA_ANALYSIS root
+!DATA_ANALYSIS/*.py
+!DATA_ANALYSIS/*.md
+!DATA_ANALYSIS/*.txt
