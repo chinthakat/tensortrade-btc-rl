@@ -47,7 +47,7 @@ class EpisodeTradeAnalyzer:
         
         console.print(f"📊 Trade Analysis initialized in: {self.analysis_dir}")
     
-    def find_episode_logs(self, episodes_dir: str = "episodes") -> Dict[str, List[str]]:
+    def find_episode_logs(self, episodes_dir: str = "../episodes") -> Dict[str, List[str]]:
         """Find all trade log files across episodes"""
         episodes_path = Path(episodes_dir)
         episode_logs = {}

@@ -344,6 +344,58 @@ def install_pdf_dependencies():
     except Exception as e:
         console.print(f"[red][ERROR] Error installing dependencies: {str(e)}[/red]")
 
+def run_enhanced_trade_analysis():
+    """Run the enhanced trade analyzer on a specific file"""
+    console.print("[bold]🔬 Enhanced Trade Analysis[/bold]")
+    
+    # Find available trade files
+    episodes_dir = Path("../episodes")
+    if not episodes_dir.exists():
+        console.print("[red][ERROR] Episodes directory not found[/red]")
+        return
+    
+    trade_files = []
+    for episode_dir in episodes_dir.iterdir():
+        if episode_dir.is_dir():
+            logs_dir = episode_dir / "logs"
+            if logs_dir.exists():
+                for file in logs_dir.glob("trades_*.csv"):
+                    trade_files.append(file)
+    
+    if not trade_files:
+        console.print("[red][ERROR] No trade files found in episodes[/red]")
+        return
+    
+    # Display available files
+    console.print("\n[cyan]Available trade files:[/cyan]")
+    for i, file in enumerate(trade_files):
+        file_size = file.stat().st_size / 1024  # KB
+        console.print(f"  {i+1}. {file.name} ({file_size:.1f} KB)")
+    
+    try:
+        choice = IntPrompt.ask("Select file to analyze", default=1)
+        if 1 <= choice <= len(trade_files):
+            selected_file = trade_files[choice-1]
+            
+            console.print(f"[cyan]Analyzing: {selected_file.name}[/cyan]")
+            
+            # Run enhanced analyzer
+            result = subprocess.run([
+                sys.executable, 
+                "enhanced_trade_analyzer.py", 
+                str(selected_file)
+            ], cwd="DATA_ANALYSIS", capture_output=False)
+            
+            if result.returncode == 0:
+                console.print("[green][SUCCESS] Enhanced analysis completed successfully![/green]")
+            else:
+                console.print("[red][ERROR] Enhanced analysis failed[/red]")
+        else:
+            console.print("[red][ERROR] Invalid selection[/red]")
+            
+    except Exception as e:
+        console.print(f"[red][ERROR] Error running enhanced analysis: {str(e)}[/red]")
+
 def main():
     """Main menu interface"""
     
@@ -369,14 +421,15 @@ def main():
             "7. 🗑️  Clean Analysis Results", 
             "8. 🔧 Setup Analysis Environment",
             "9. 📦 Install PDF Dependencies",
-            "10. [ERROR] Exit"
+            "10. 🔬 Run Enhanced Trade Analysis",
+            "11. ❌ Exit"
         ]
         
         console.print("\n[bold]Select an option:[/bold]")
         for option in menu_options:
             console.print(f"   {option}")
         
-        choice = Prompt.ask("\nEnter your choice", choices=["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"], default="1")
+        choice = Prompt.ask("\nEnter your choice", choices=["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"], default="1")
         
         if choice == "1":
             run_comprehensive_analysis()
@@ -397,11 +450,13 @@ def main():
         elif choice == "9":
             install_pdf_dependencies()
         elif choice == "10":
+            run_enhanced_trade_analysis()
+        elif choice == "11":
             console.print("[yellow]Goodbye! 👋[/yellow]")
             break
         
         # Wait for user input before continuing
-        if choice != "10":
+        if choice != "11":
             console.print("\n[dim]Press Enter to continue...[/dim]")
             input()
 
