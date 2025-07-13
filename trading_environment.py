@@ -545,13 +545,88 @@ class FuturesTradingEnv(gym.Env):
     
     def _execute_action(self, target_leverage: float, risk_percentage: float, current_price: float):
         """Execute trading action based on target leverage and risk percentage"""
+        # Enhanced risk controls
+        max_risk_per_trade = 0.02  # Maximum 2% risk per trade
+        risk_percentage = min(risk_percentage, max_risk_per_trade)
+        
+        # Debug: Log action execution every 50 steps
+        if hasattr(self, 'logger') and self.logger and self.current_step % 50 == 0:
+            debug_action = {
+                'trade_id': f"ACTION_{self.current_step}",
+                'training_step': self.current_step,
+                'training_iteration': getattr(self, 'training_iteration', 0),
+                'entry_datetime': self.df.iloc[self.current_step]['timestamp'] if self.current_step < len(self.df) else f"step_{self.current_step}",
+                'close_datetime': '',
+                'side': f"ACTION_CALLED",
+                'entry_action': f"leverage: {target_leverage:.4f}, risk: {risk_percentage:.4f}",
+                'entry_price': current_price,
+                'close_price': '',
+                'net_pnl': 0,
+                'close_reward': 0,
+                'entry_net_worth': self.equity,
+                'close_net_worth': self.equity,
+                'trade_duration_hours': 0,
+                'status': f"equity: {self.equity:.2f}",
+                'win_loss': 'ACTION_DEBUG',
+                'position_size': self.position_size,
+                'fees_paid': 0,
+                'stop_loss_price': '',
+                'take_profit_price': '',
+                'close_reason': 'ACTION_ENTRY'
+            }
+            self.logger.log_trade(debug_action)
+        
+        # Limit leverage based on current equity ratio
+        equity_ratio = self.equity / self.initial_equity
+        if equity_ratio < 0.5:  # If down 50%, reduce max leverage
+            max_allowed_leverage = self.max_leverage * 0.5
+        elif equity_ratio < 0.2:  # If down 80%, reduce leverage drastically
+            max_allowed_leverage = self.max_leverage * 0.2
+        else:
+            max_allowed_leverage = self.max_leverage
+        
+        target_leverage = np.clip(target_leverage, -max_allowed_leverage, max_allowed_leverage)
+        
         # Calculate position size based on risk percentage and leverage
         risk_equity = self.equity * risk_percentage  # Amount of equity to risk
         target_position_value = target_leverage * risk_equity
         target_position_size = target_position_value / current_price if current_price > 0 else 0
         
+        # Additional safety: limit position size to reasonable fraction of equity
+        max_position_value = self.equity * abs(target_leverage) * 0.8  # 80% safety margin
+        if abs(target_position_value) > max_position_value:
+            target_position_value = np.sign(target_position_value) * max_position_value
+            target_position_size = target_position_value / current_price if current_price > 0 else 0
+        
         # Calculate trade size needed
         trade_size = target_position_size - self.position_size
+        
+        # Debug logging to understand trading behavior
+        if hasattr(self, 'logger') and self.logger and self.current_step % 100 == 0:  # Log every 100 steps
+            debug_data = {
+                'trade_id': f"DEBUG_{self.current_step}",
+                'training_step': self.current_step,
+                'training_iteration': getattr(self, 'training_iteration', 0),
+                'entry_datetime': self.df.iloc[self.current_step]['timestamp'] if self.current_step < len(self.df) else f"step_{self.current_step}",
+                'close_datetime': '',
+                'side': f"target_leverage: {target_leverage:.4f}, risk_pct: {risk_percentage:.4f}",
+                'entry_action': f"target_pos: {target_position_size:.6f}, current_pos: {self.position_size:.6f}",
+                'entry_price': current_price,
+                'close_price': '',
+                'net_pnl': 0,
+                'close_reward': 0,
+                'entry_net_worth': self.equity,
+                'close_net_worth': self.equity,
+                'trade_duration_hours': 0,
+                'status': f"trade_size: {trade_size:.6f}",
+                'win_loss': 'SKIP' if abs(trade_size) <= 0.001 else 'EXECUTE',
+                'position_size': self.position_size,
+                'fees_paid': 0,
+                'stop_loss_price': '',
+                'take_profit_price': '',
+                'close_reason': 'DEBUG_INFO'
+            }
+            self.logger.log_trade(debug_data)
         
         if abs(trade_size) > 0.001:  # Only trade if significant change
             # Efficient trade execution - single order instead of close + open
@@ -640,23 +715,39 @@ class FuturesTradingEnv(gym.Env):
             self.take_profit_price = None
         
         # Log the efficient trade
-        if hasattr(self, 'trade_logger') and self.trade_logger:
+        if hasattr(self, 'logger') and self.logger:
             action_type = "FLIP" if old_position_size != 0 and np.sign(old_position_size) != np.sign(self.position_size) else "ADJUST"
             if old_position_size == 0:
                 action_type = "OPEN"
             elif abs(self.position_size) < 0.001:
                 action_type = "CLOSE"
             
-            self.trade_logger.log_trade(
-                step=self.current_step,
-                action=action_type,
-                price=current_price,
-                position_size=self.position_size,
-                pnl=realized_pnl,
-                fee=trading_fee,
-                balance=self.balance,
-                leverage=abs(self.position_size * current_price) / self.equity if self.equity > 0 else 0
-            )
+            # Create trade data dictionary for logging
+            trade_data = {
+                'trade_id': self.trade_id,
+                'training_step': self.current_step,
+                'training_iteration': getattr(self, 'training_iteration', 0),
+                'entry_datetime': self.df.iloc[self.current_step]['timestamp'] if self.current_step < len(self.df) else f"step_{self.current_step}",
+                'close_datetime': '',  # Will be filled when trade closes
+                'side': 'LONG' if self.position_size > 0 else 'SHORT' if self.position_size < 0 else 'FLAT',
+                'entry_action': action_type,
+                'entry_price': current_price,
+                'close_price': '',  # Will be filled when trade closes
+                'net_pnl': realized_pnl,
+                'close_reward': 0,  # Will be filled when trade closes
+                'entry_net_worth': self.equity,
+                'close_net_worth': self.equity,
+                'trade_duration_hours': 0,
+                'status': 'OPEN' if abs(self.position_size) > 0.001 else 'CLOSED',
+                'win_loss': 'WIN' if realized_pnl > 0 else 'LOSS' if realized_pnl < 0 else 'NEUTRAL',
+                'position_size': self.position_size,
+                'fees_paid': trading_fee,
+                'stop_loss_price': getattr(self, 'stop_loss_price', ''),
+                'take_profit_price': getattr(self, 'take_profit_price', ''),
+                'close_reason': action_type
+            }
+            
+            self.logger.log_trade(trade_data)
     
     def _update_stop_loss_take_profit(self, current_price: float):
         """Update stop-loss and take-profit prices with dynamic ATR-based calculation"""
