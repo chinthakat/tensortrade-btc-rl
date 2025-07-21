@@ -1,0 +1,161 @@
+================================================================================
+TRADE ANOMALY ANALYSIS REPORT
+================================================================================
+Generated: 2025-07-21 23:55:07
+Market Data: data/BTC_SYNTHETIC_MIXED_15m_2024-01-01_to_2024-12-31.csv
+Trade File: episodes\episode_01_20250721_234711\logs\trades_episode_01_20250721_234711_env0.csv
+
+SUMMARY STATISTICS
+----------------------------------------
+Total Trades Analyzed: 14,160
+Entry Price Anomalies: 10 (0.07%)
+Close Price Anomalies: 0 (0.00%)
+Trades Without Market Data: 0
+
+ENTRY PRICE DIFFERENCE STATISTICS
+----------------------------------------
+Mean Difference: 0.0649%
+Median Difference: 0.0000%
+Max Difference: 100.0000%
+95th Percentile: 0.0000%
+
+CLOSE PRICE DIFFERENCE STATISTICS
+----------------------------------------
+Mean Difference: 0.0000%
+Median Difference: 0.0000%
+Max Difference: 0.0000%
+95th Percentile: 0.0000%
+
+DETAILED ANOMALY REPORT
+----------------------------------------
+
+ANOMALY #1
+Trade ID: TRADE_00170
+Side: FLAT
+Status: CLOSED
+Entry Time: 2024-01-08 09:00:00
+
+  ENTRY_PRICE_ANOMALY:
+    Trade Price: $44,529.74
+    Market Price: $44,986.16
+    Difference: 1.0146%
+    Timestamp: 2024-01-08 09:00:00
+
+----------------------------------------
+ANOMALY #2
+Trade ID: ACTION_STATS_1000
+Side: HOLD:15/941
+Status: Total actions: 941
+Entry Time: 2024-01-10 23:00:00
+
+  ENTRY_PRICE_ANOMALY:
+    Trade Price: $0.00
+    Market Price: $38,946.44
+    Difference: 100.0000%
+    Timestamp: 2024-01-10 23:00:00
+
+----------------------------------------
+ANOMALY #3
+Trade ID: ACTION_STATS_2000
+Side: HOLD:30/1941
+Status: Total actions: 1941
+Entry Time: 2024-01-21 09:00:00
+
+  ENTRY_PRICE_ANOMALY:
+    Trade Price: $0.00
+    Market Price: $31,100.04
+    Difference: 100.0000%
+    Timestamp: 2024-01-21 09:00:00
+
+----------------------------------------
+ANOMALY #4
+Trade ID: ACTION_STATS_3000
+Side: HOLD:39/2941
+Status: Total actions: 2941
+Entry Time: 2024-01-31 19:00:00
+
+  ENTRY_PRICE_ANOMALY:
+    Trade Price: $0.00
+    Market Price: $31,368.61
+    Difference: 100.0000%
+    Timestamp: 2024-01-31 19:00:00
+
+----------------------------------------
+ANOMALY #5
+Trade ID: ACTION_STATS_4000
+Side: HOLD:42/3941
+Status: Total actions: 3941
+Entry Time: 2024-02-11 05:00:00
+
+  ENTRY_PRICE_ANOMALY:
+    Trade Price: $0.00
+    Market Price: $29,545.49
+    Difference: 100.0000%
+    Timestamp: 2024-02-11 05:00:00
+
+----------------------------------------
+ANOMALY #6
+Trade ID: ACTION_STATS_5000
+Side: HOLD:61/4941
+Status: Total actions: 4941
+Entry Time: 2024-02-21 15:00:00
+
+  ENTRY_PRICE_ANOMALY:
+    Trade Price: $0.00
+    Market Price: $21,685.39
+    Difference: 100.0000%
+    Timestamp: 2024-02-21 15:00:00
+
+----------------------------------------
+ANOMALY #7
+Trade ID: ACTION_STATS_6000
+Side: HOLD:69/5941
+Status: Total actions: 5941
+Entry Time: 2024-03-03 01:00:00
+
+  ENTRY_PRICE_ANOMALY:
+    Trade Price: $0.00
+    Market Price: $22,594.06
+    Difference: 100.0000%
+    Timestamp: 2024-03-03 01:00:00
+
+----------------------------------------
+ANOMALY #8
+Trade ID: ACTION_STATS_7000
+Side: HOLD:75/6941
+Status: Total actions: 6941
+Entry Time: 2024-03-13 11:00:00
+
+  ENTRY_PRICE_ANOMALY:
+    Trade Price: $0.00
+    Market Price: $15,378.84
+    Difference: 100.0000%
+    Timestamp: 2024-03-13 11:00:00
+
+----------------------------------------
+ANOMALY #9
+Trade ID: ACTION_STATS_8000
+Side: HOLD:95/7941
+Status: Total actions: 7941
+Entry Time: 2024-03-23 21:00:00
+
+  ENTRY_PRICE_ANOMALY:
+    Trade Price: $0.00
+    Market Price: $16,115.86
+    Difference: 100.0000%
+    Timestamp: 2024-03-23 21:00:00
+
+----------------------------------------
+ANOMALY #10
+Trade ID: ACTION_STATS_9000
+Side: HOLD:106/8941
+Status: Total actions: 8941
+Entry Time: 2024-04-03 07:00:00
+
+  ENTRY_PRICE_ANOMALY:
+    Trade Price: $0.00
+    Market Price: $14,057.25
+    Difference: 100.0000%
+    Timestamp: 2024-04-03 07:00:00
+
+----------------------------------------
