@@ -380,7 +380,7 @@ class EnhancedTradeAnalyzer:
             for _, row in extreme_pnl.iterrows():
                 anomalies.append({
                     'type': 'Extreme PnL',
-                    'trade_id': row['trade_id'],
+                    'trade_id': self._standardize_trade_id(row['trade_id']),
                     'training_step': row['training_step'],
                     'value': row['net_pnl'],
                     'description': f"PnL of ${row['net_pnl']:.2f} is {abs(row['net_pnl'] - pnl_mean) / pnl_std:.1f}σ from mean"
@@ -391,7 +391,7 @@ class EnhancedTradeAnalyzer:
         for _, row in zero_position.iterrows():
             anomalies.append({
                 'type': 'Zero Position',
-                'trade_id': row['trade_id'],
+                'trade_id': self._standardize_trade_id(row['trade_id']),
                 'training_step': row['training_step'],
                 'value': 0,
                 'description': "Trade with zero position size"
@@ -402,7 +402,7 @@ class EnhancedTradeAnalyzer:
         for _, row in closed_no_price.iterrows():
             anomalies.append({
                 'type': 'Missing Close Price',
-                'trade_id': row['trade_id'],
+                'trade_id': self._standardize_trade_id(row['trade_id']),
                 'training_step': row['training_step'],
                 'value': row['close_price'],
                 'description': "Closed trade without close price"
@@ -487,6 +487,25 @@ class EnhancedTradeAnalyzer:
             self.save_analysis_report()
 
         console.print("\n[bold green]🎉 Enhanced analysis complete![/bold green]")
+
+    def _standardize_trade_id(self, trade_id) -> str:
+        """
+        Standardizes trade ID format for consistent display.
+        Converts both numeric and string trade IDs to consistent format.
+        """
+        if isinstance(trade_id, (int, float)):
+            return f"TRADE_{int(trade_id):05d}"
+        elif isinstance(trade_id, str):
+            if trade_id.startswith('TRADE_'):
+                return trade_id
+            else:
+                try:
+                    # Try to convert string number to standardized format
+                    return f"TRADE_{int(trade_id):05d}"
+                except ValueError:
+                    return str(trade_id)
+        else:
+            return str(trade_id)
 
 
 def main():

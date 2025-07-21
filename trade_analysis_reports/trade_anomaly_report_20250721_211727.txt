@@ -1,0 +1,24 @@
+================================================================================
+TRADE ANOMALY ANALYSIS REPORT
+================================================================================
+Generated: 2025-07-21 21:17:27
+Market Data: data/BTC_SYNTHETIC_MIXED_15m_2024-01-01_to_2024-12-31.csv
+Trade File: episodes\test_fix_20250721_211636\logs\trades_test_fix_20250721_211636.csv
+
+SUMMARY STATISTICS
+----------------------------------------
+Total Trades Analyzed: 16
+Entry Price Anomalies: 0 (0.00%)
+Close Price Anomalies: 0 (0.00%)
+Trades Without Market Data: 0
+
+ENTRY PRICE DIFFERENCE STATISTICS
+----------------------------------------
+Mean Difference: 0.0910%
+Median Difference: 0.0000%
+Max Difference: 0.4610%
+95th Percentile: 0.3406%
+
+DETAILED ANOMALY REPORT
+----------------------------------------
+No anomalies detected within the specified tolerance.
