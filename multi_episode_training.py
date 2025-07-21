@@ -670,6 +670,83 @@ def get_existing_models():
     
     return models
 
+def cleanup_all_models():
+    """Completely clean up ALL models from both episodes and models directories"""
+    console.print("\n[bold red]🗑️ CLEANUP ALL MODELS[/bold red]")
+    console.print("[yellow]⚠️  This will permanently delete ALL trained models![/yellow]")
+    console.print("[yellow]This includes:[/yellow]")
+    console.print("  • All episode models (checkpoints, final models)")
+    console.print("  • All models in the models/ directory")
+    console.print("  • best_model.zip and all other saved models")
+    console.print("  • Model files will NOT be archived - they will be deleted!")
+    
+    from rich.prompt import Confirm
+    
+    # Double confirmation
+    if not Confirm.ask("\n[red]Are you absolutely sure you want to delete ALL models?[/red]"):
+        console.print("[green]Cleanup cancelled[/green]")
+        return False
+    
+    if not Confirm.ask("[red]This cannot be undone! Final confirmation - DELETE ALL MODELS?[/red]"):
+        console.print("[green]Cleanup cancelled[/green]")
+        return False
+    
+    try:
+        deleted_count = 0
+        total_size_mb = 0
+        
+        # Clean up episodes directory
+        episodes_dir = Path("episodes")
+        if episodes_dir.exists():
+            console.print("\n[yellow]🗂️ Cleaning episodes directory...[/yellow]")
+            for episode_dir in episodes_dir.iterdir():
+                if episode_dir.is_dir():
+                    models_dir = episode_dir / "models"
+                    if models_dir.exists():
+                        for model_file in models_dir.glob("*.zip"):
+                            file_size = model_file.stat().st_size / 1024 / 1024
+                            model_file.unlink()
+                            console.print(f"  ❌ Deleted: {model_file.relative_to(episodes_dir.parent)}")
+                            deleted_count += 1
+                            total_size_mb += file_size
+                        
+                        # Remove empty models directory
+                        if not any(models_dir.iterdir()):
+                            models_dir.rmdir()
+                            console.print(f"  📁 Removed empty directory: {models_dir.relative_to(episodes_dir.parent)}")
+        
+        # Clean up main models directory
+        models_dir = Path("models")
+        if models_dir.exists():
+            console.print("\n[yellow]🤖 Cleaning models directory...[/yellow]")
+            for model_file in models_dir.glob("*.zip"):
+                file_size = model_file.stat().st_size / 1024 / 1024
+                model_file.unlink()
+                console.print(f"  ❌ Deleted: {model_file.name}")
+                deleted_count += 1
+                total_size_mb += file_size
+            
+            # Also clean other model formats
+            for model_file in models_dir.glob("*.pkl"):
+                file_size = model_file.stat().st_size / 1024 / 1024
+                model_file.unlink()
+                console.print(f"  ❌ Deleted: {model_file.name}")
+                deleted_count += 1
+                total_size_mb += file_size
+        
+        if deleted_count > 0:
+            console.print(f"\n[bold green]✅ Cleanup completed![/bold green]")
+            console.print(f"[green]   🗑️ Deleted {deleted_count} model files[/green]")
+            console.print(f"[green]   💾 Freed {total_size_mb:.1f} MB of disk space[/green]")
+        else:
+            console.print("\n[yellow]📭 No model files found to delete[/yellow]")
+        
+        return True
+        
+    except Exception as e:
+        console.print(f"\n[red]❌ Error during cleanup: {str(e)}[/red]")
+        return False
+
 def setup_multi_episode_training():
     """Setup and run multi-episode training"""
     console.print("[bold]🎯 Multi-Episode Training Setup[/bold]")
@@ -734,14 +811,26 @@ def setup_multi_episode_training():
                 info['modified'].strftime("%Y-%m-%d %H:%M")
             )
         
+        # Add cleanup option at the bottom
+        cleanup_index = len(model_list) + 1
+        model_table.add_row(str(cleanup_index), "[bold red]🗑️ CLEANUP ALL MODELS[/bold red]", "Delete Everything", "-", "-")
+        
         console.print(model_table)
         
         model_choice = IntPrompt.ask(
-            "Select model (0 = new, 1+ = existing)", 
+            f"Select model (0 = new, 1-{len(model_list)} = existing, {cleanup_index} = cleanup all)", 
             default=0
         )
         
-        if model_choice == 0:
+        if model_choice == cleanup_index:
+            # Handle cleanup
+            if cleanup_all_models():
+                console.print("[green]All models have been deleted. You can now create a new model.[/green]")
+                starting_model_path = None
+            else:
+                console.print("[yellow]Cleanup cancelled. Returning to main menu.[/yellow]")
+                return
+        elif model_choice == 0:
             # Create new model
             starting_model_path = None
             console.print("[green]✅ Creating new model from scratch[/green]")
@@ -757,7 +846,18 @@ def setup_multi_episode_training():
             console.print("[red]Invalid model selection[/red]")
             return
     else:
-        console.print("[yellow]No existing models found. Creating new model.[/yellow]")
+        console.print("[yellow]No existing models found.[/yellow]")
+        console.print("[cyan]Options:[/cyan]")
+        console.print("1. 🆕 Create new model")
+        console.print("2. 🗑️ Cleanup any hidden/corrupted models and create new")
+        
+        choice = IntPrompt.ask("Select option", default=1)
+        if choice == 2:
+            if cleanup_all_models():
+                console.print("[green]Cleanup completed. Creating new model.[/green]")
+            else:
+                console.print("[yellow]Cleanup cancelled. Creating new model anyway.[/yellow]")
+        
         starting_model_path = None
     
     # Training configuration
