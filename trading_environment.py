@@ -586,6 +586,9 @@ class FuturesTradingEnv(gym.Env):
         self.unrealized_pnl = 0.0
         self.leverage = 0.0
         
+        # Prevent duplicate trade logging
+        self._efficient_trade_logged = False
+        
         # Risk management
         self.stop_loss_price = None
         self.take_profit_price = None
@@ -627,6 +630,9 @@ class FuturesTradingEnv(gym.Env):
         
         # Action type statistics
         self.action_type_counts = {"HOLD": 0, "BUY": 0, "SELL": 0, "CANCEL": 0}
+        
+        # Reset duplicate logging prevention flag
+        self._efficient_trade_logged = False
         
         # Episode statistics
         self.episode_trades = 0
@@ -1131,6 +1137,10 @@ class FuturesTradingEnv(gym.Env):
             }
             
             self.logger.log_trade(trade_data)
+            
+            # Set flag to prevent duplicate logging in _close_position
+            if action_type in ["CLOSE", "FLIP"]:
+                self._efficient_trade_logged = True
     
     def _update_stop_loss_take_profit(self, current_price: float):
         """Update stop-loss and take-profit prices with dynamic ATR-based calculation"""
@@ -1318,9 +1328,12 @@ class FuturesTradingEnv(gym.Env):
                 self.balance -= funding_cost
                 self.total_funding_costs += funding_cost
         
-        # Log trade
-        if self.logger:
+        # Log trade (only if not already logged by efficient trading system)
+        if self.logger and not getattr(self, '_efficient_trade_logged', False):
             self._log_trade(current_price, pnl, reason)
+        
+        # Reset the efficient trade logging flag
+        self._efficient_trade_logged = False
         
         # Reset position
         self.position_size = 0.0
@@ -1348,15 +1361,9 @@ class FuturesTradingEnv(gym.Env):
         duration_steps = self.current_step - self.trade_start_step
         duration_hours = duration_steps * 0.25  # 15min intervals
         
-        entry_datetime = pd.to_datetime(
-            self._safe_get_price_data(self.trade_start_step, 'timestamp', 0), 
-            unit='s'
-        ).strftime('%d/%m/%Y %H:%M')
-        
-        close_datetime = pd.to_datetime(
-            self._safe_get_price_data(self.current_step, 'timestamp', 0), 
-            unit='s'
-        ).strftime('%d/%m/%Y %H:%M')
+        # Use Unix timestamps to match efficient trade system format
+        entry_datetime = self._safe_get_price_data(self.trade_start_step, 'timestamp', 0)
+        close_datetime = self._safe_get_price_data(self.current_step, 'timestamp', 0)
         
         # Preserve entry price - if it's zero, try to get it from trade start data
         logged_entry_price = self.entry_price
