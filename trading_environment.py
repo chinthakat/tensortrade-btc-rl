@@ -1098,11 +1098,15 @@ class FuturesTradingEnv(gym.Env):
         
         # Log the efficient trade
         if hasattr(self, 'logger') and self.logger:
-            action_type = "FLIP" if old_position_size != 0 and np.sign(old_position_size) != np.sign(self.position_size) else "ADJUST"
+            # Determine clear action type based on position changes
             if old_position_size == 0:
-                action_type = "OPEN"
+                action_type = "OPEN_LONG" if self.position_size > 0 else "OPEN_SHORT"
             elif abs(self.position_size) < 0.001:
-                action_type = "CLOSE"
+                action_type = "CLOSE_LONG" if old_position_size > 0 else "CLOSE_SHORT" 
+            elif old_position_size != 0 and np.sign(old_position_size) != np.sign(self.position_size):
+                action_type = "FLIP_LONG_TO_SHORT" if old_position_size > 0 else "FLIP_SHORT_TO_LONG"
+            else:
+                action_type = "ADJUST_LONG" if self.position_size > 0 else "ADJUST_SHORT"
             
             # Determine the correct entry price for logging
             # For new positions/opens, use current_price
@@ -1372,6 +1376,14 @@ class FuturesTradingEnv(gym.Env):
             logged_entry_price = self._safe_get_price_data(self.trade_start_step, 'close')
             logging.warning(f"ENTRY_PRICE_FALLBACK: Using price from trade start step {self.trade_start_step}: {logged_entry_price}")
         
+        # Determine clear action label based on what actually happened
+        if reason in ["CANCEL_ACTION", "LIQUIDATION", "STOP_LOSS", "TAKE_PROFIT"]:
+            action_label = "CLOSE"
+        elif self.position_side == 1:  # Was long position
+            action_label = "CLOSE_LONG"  # Closing a long position (selling)
+        else:  # Was short position  
+            action_label = "CLOSE_SHORT"  # Closing a short position (covering)
+        
         trade_data = {
             'trade_id': f"TRADE_{self.trade_id:05d}",
             'training_step': self.current_step,
@@ -1379,7 +1391,7 @@ class FuturesTradingEnv(gym.Env):
             'entry_datetime': entry_datetime,
             'close_datetime': close_datetime,
             'side': 'LONG' if self.position_side == 1 else 'SHORT',
-            'entry_action': 'BUY' if self.position_side == 1 else 'SELL',
+            'entry_action': action_label,
             'entry_price': logged_entry_price,
             'close_price': exit_price,
             'net_pnl': pnl,
