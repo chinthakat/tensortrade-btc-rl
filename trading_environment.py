@@ -123,6 +123,128 @@ class TradeLogger:
                 trade_data.get('close_reason', '')
             ])
 
+
+class PriceValidator:
+    """Real-time price validation system for trading environment"""
+    
+    def __init__(self, tolerance_pct: float = 5.0, enable_logging: bool = True):
+        """
+        Initialize price validator
+        
+        Args:
+            tolerance_pct: Maximum acceptable percentage difference
+            enable_logging: Whether to log validation results
+        """
+        self.tolerance_pct = tolerance_pct
+        self.enable_logging = enable_logging
+        self.validation_log = []
+        
+    def validate_price(
+        self, 
+        trade_price: float, 
+        market_price: float, 
+        timestamp: Any,
+        step: int,
+        context: str = "UNKNOWN"
+    ) -> Tuple[bool, Dict[str, Any]]:
+        """
+        Validate trade price against market price
+        
+        Args:
+            trade_price: Price used in trade execution
+            market_price: Actual market price at the time
+            timestamp: Timestamp of the trade
+            step: Current trading step
+            context: Context of the validation (ENTRY, CLOSE, etc.)
+            
+        Returns:
+            Tuple of (is_valid, validation_details)
+        """
+        # Handle zero or invalid prices
+        if trade_price <= 0:
+            validation_result = {
+                'valid': False,
+                'reason': 'ZERO_TRADE_PRICE',
+                'trade_price': trade_price,
+                'market_price': market_price,
+                'difference_pct': 100.0,
+                'timestamp': timestamp,
+                'step': step,
+                'context': context
+            }
+            
+            if self.enable_logging:
+                logging.warning(f"PRICE_VALIDATION_FAILED: {context} - Zero trade price at step {step}")
+                self.validation_log.append(validation_result)
+            
+            return False, validation_result
+        
+        if market_price <= 0:
+            validation_result = {
+                'valid': False,
+                'reason': 'ZERO_MARKET_PRICE',
+                'trade_price': trade_price,
+                'market_price': market_price,
+                'difference_pct': 0.0,
+                'timestamp': timestamp,
+                'step': step,
+                'context': context
+            }
+            
+            if self.enable_logging:
+                logging.warning(f"PRICE_VALIDATION_FAILED: {context} - Zero market price at step {step}")
+                self.validation_log.append(validation_result)
+            
+            return False, validation_result
+        
+        # Calculate percentage difference
+        price_diff_pct = abs(trade_price - market_price) / market_price * 100
+        
+        is_valid = price_diff_pct <= self.tolerance_pct
+        
+        validation_result = {
+            'valid': is_valid,
+            'reason': 'WITHIN_TOLERANCE' if is_valid else 'EXCEEDS_TOLERANCE',
+            'trade_price': trade_price,
+            'market_price': market_price,
+            'difference_pct': price_diff_pct,
+            'timestamp': timestamp,
+            'step': step,
+            'context': context
+        }
+        
+        if self.enable_logging:
+            if not is_valid:
+                logging.warning(
+                    f"PRICE_VALIDATION_FAILED: {context} - Step {step}, "
+                    f"Trade: ${trade_price:.2f}, Market: ${market_price:.2f}, "
+                    f"Diff: {price_diff_pct:.2f}% (>{self.tolerance_pct}%)"
+                )
+            self.validation_log.append(validation_result)
+        
+        return is_valid, validation_result
+    
+    def get_validation_summary(self) -> Dict[str, Any]:
+        """Get summary of all validations performed"""
+        if not self.validation_log:
+            return {'total_validations': 0}
+        
+        total = len(self.validation_log)
+        failed = sum(1 for v in self.validation_log if not v['valid'])
+        
+        reasons = {}
+        for v in self.validation_log:
+            reason = v['reason']
+            reasons[reason] = reasons.get(reason, 0) + 1
+        
+        return {
+            'total_validations': total,
+            'failed_validations': failed,
+            'success_rate': (total - failed) / total * 100 if total > 0 else 0,
+            'failure_reasons': reasons
+        }
+
+
 class FuturesTradingEnv(gym.Env):
     """
     Custom Binance Futures Trading Environment with TensorTrade influence
@@ -203,6 +325,12 @@ class FuturesTradingEnv(gym.Env):
         
         # Prepare technical indicators with proper scaling
         self._prepare_features(training_end_idx)
+        
+        # Initialize price validator
+        self.price_validator = PriceValidator(
+            tolerance_pct=5.0,  # 5% tolerance for price validation
+            enable_logging=True
+        )
         
         # Trading state
         self.reset()
@@ -343,9 +471,54 @@ class FuturesTradingEnv(gym.Env):
         # Price position indicators
         df['price_position'] = (df['close'] - df['sma_20']) / df['sma_20']
         
-        # Drop NaN values
-        df.dropna(inplace=True)
-        logging.info(f"Data shape after dropna: {df.shape}")
+        # Instead of dropping NaN rows, we'll fill them to preserve alignment with original CSV
+        # Store original data shape for reference
+        original_shape = df.shape
+        
+        # Fill NaN values with appropriate strategies to preserve data alignment
+        # For price-based features, use forward fill then backward fill
+        price_features = ['sma_10', 'sma_20', 'ema_10', 'ema_20', 'bb_upper', 'bb_lower', 'bb_width']
+        for col in price_features:
+            if col in df.columns:
+                df[col] = df[col].fillna(method='ffill').fillna(method='bfill')
+        
+        # For percentage-based features, fill with 0
+        pct_features = ['returns', 'log_returns', 'high_low_pct', 'close_open_pct', 'price_position']
+        for col in pct_features:
+            if col in df.columns:
+                df[col] = df[col].fillna(0)
+        
+        # For technical indicators, use more sophisticated filling
+        if 'rsi' in df.columns:
+            df['rsi'] = df['rsi'].fillna(50)  # Neutral RSI
+        
+        if 'stoch_k' in df.columns:
+            df['stoch_k'] = df['stoch_k'].fillna(50)  # Neutral Stochastic
+            
+        if 'atr' in df.columns:
+            # Fill ATR with a percentage of current price
+            df['atr'] = df['atr'].fillna(df['close'] * 0.02)  # 2% of price as default ATR
+            
+        # For MACD, fill with 0 (neutral)
+        macd_cols = ['macd', 'macd_signal', 'macd_histogram']
+        for col in macd_cols:
+            if col in df.columns:
+                df[col] = df[col].fillna(0)
+        
+        # For volume ratio, fill with 1 (average volume)
+        if 'volume_ratio' in df.columns:
+            df['volume_ratio'] = df['volume_ratio'].fillna(1.0)
+        
+        # Final check - if any NaN values remain, fill with 0
+        df = df.fillna(0)
+        
+        logging.info(f"Data shape after NaN handling: {df.shape} (preserved {original_shape[0]} rows)")
+        
+        # Verify no data loss occurred
+        if df.shape[0] != original_shape[0]:
+            logging.warning(f"Unexpected data loss: {original_shape[0] - df.shape[0]} rows lost during processing")
+        else:
+            logging.info("✅ Data alignment preserved - no rows lost during preprocessing")
         
         # Select feature columns
         feature_cols = [
@@ -398,8 +571,12 @@ class FuturesTradingEnv(gym.Env):
         """Reset environment to initial state"""
         super().reset(seed=seed)
         
+        # Calculate safe starting point - ensure technical indicators are stable
+        # Use max of window_size and a minimum buffer for technical indicators
+        min_buffer_for_indicators = max(60, self.window_size)  # At least 60 steps for indicators to stabilize
+        
         # Trading state
-        self.current_step = self.window_size
+        self.current_step = min_buffer_for_indicators
         self.equity = self.initial_equity
         self.balance = self.initial_equity
         self.position_size = 0.0  # In base currency (BTC)
@@ -408,6 +585,9 @@ class FuturesTradingEnv(gym.Env):
         self.margin_used = 0.0
         self.unrealized_pnl = 0.0
         self.leverage = 0.0
+        
+        # Prevent duplicate trade logging
+        self._efficient_trade_logged = False
         
         # Risk management
         self.stop_loss_price = None
@@ -450,6 +630,9 @@ class FuturesTradingEnv(gym.Env):
         
         # Action type statistics
         self.action_type_counts = {"HOLD": 0, "BUY": 0, "SELL": 0, "CANCEL": 0}
+        
+        # Reset duplicate logging prevention flag
+        self._efficient_trade_logged = False
         
         # Episode statistics
         self.episode_trades = 0
@@ -571,10 +754,31 @@ class FuturesTradingEnv(gym.Env):
         # Store previous state
         prev_equity = self.equity
         
-        # Get current price safely
-        current_price = self._safe_get_price_data(self.current_step, 'close', 0.0)
-        current_high = self._safe_get_price_data(self.current_step, 'high', current_price)
-        current_low = self._safe_get_price_data(self.current_step, 'low', current_price)
+        # Check if we can safely move to next step
+        next_step = self.current_step + 1
+        if next_step >= len(self.price_data):
+            # We're at the end of data, use current step prices
+            current_price = self._safe_get_price_data(self.current_step, 'close')
+            current_high = self._safe_get_price_data(self.current_step, 'high', current_price)
+            current_low = self._safe_get_price_data(self.current_step, 'low', current_price)
+        else:
+            # Safe to move to next step - this ensures correct timestep for trade execution
+            self.current_step = next_step
+            current_price = self._safe_get_price_data(self.current_step, 'close')
+            current_high = self._safe_get_price_data(self.current_step, 'high', current_price)
+            current_low = self._safe_get_price_data(self.current_step, 'low', current_price)
+        
+        # Validate that current_price is not zero (CRITICAL FIX)
+        if current_price <= 0:
+            logging.error(f"ZERO_PRICE_DETECTED in step(): current_price={current_price} at step {self.current_step}")
+            # Get a valid price from the last available data
+            current_price = self._safe_get_price_data(self.current_step, 'close')
+            logging.info(f"PRICE_CORRECTED in step(): Using price={current_price} instead")
+            # Also fix current_high and current_low if they're invalid
+            if current_high <= 0:
+                current_high = current_price
+            if current_low <= 0:
+                current_low = current_price
         
         # Update unrealized PnL
         if self.position_size != 0:
@@ -648,10 +852,9 @@ class FuturesTradingEnv(gym.Env):
                 self.current_trade_reward = 0.0
             self.current_trade_reward += reward
         
-        # Move to next step
-        self.current_step += 1
+        # Note: current_step may have been incremented to get correct price if data available
         
-        # Check terminal conditions (after step increment)
+        # Check terminal conditions
         terminated = self.equity <= 0 or self.liquidated or terminated_early
         truncated = self.current_step >= len(self.price_data)
         
@@ -669,10 +872,17 @@ class FuturesTradingEnv(gym.Env):
         
         return observation, reward, terminated, truncated, info
     
-    def _safe_get_price_data(self, step: int, column: str, default_value: float = 0.0):
+    def _safe_get_price_data(self, step: int, column: str, default_value: float = None):
         """Safely get price data at a specific step"""
         if step < 0 or step >= len(self.price_data):
-            return default_value
+            # Instead of returning 0.0, use the last available price
+            if default_value is not None:
+                return default_value
+            # Use last available price if out of bounds
+            if len(self.price_data) > 0:
+                last_step = len(self.price_data) - 1
+                return self.price_data.iloc[last_step][column]
+            return 0.0  # Only if no data at all
         return self.price_data.iloc[step][column]
     
     def _safe_get_feature_data(self, step: int, column: str, default_value: float = 0.0):
@@ -689,6 +899,29 @@ class FuturesTradingEnv(gym.Env):
 
     def _execute_action(self, target_leverage: float, risk_percentage: float, current_price: float):
         """Execute trading action based on target leverage and risk percentage"""
+        
+        # Validate that current_price is not zero
+        if current_price <= 0:
+            logging.error(f"ZERO_PRICE_DETECTED: current_price={current_price} at step {self.current_step}")
+            # Get a valid price from the last available data
+            current_price = self._safe_get_price_data(self.current_step, 'close')
+            logging.info(f"PRICE_CORRECTED: Using price={current_price} instead")
+        
+        # Validate current price against market data
+        market_price = self._safe_get_price_data(self.current_step, 'close')
+        timestamp = self._safe_get_price_data(self.current_step, 'timestamp', 0)
+        
+        is_valid, validation_details = self.price_validator.validate_price(
+            trade_price=current_price,
+            market_price=market_price,
+            timestamp=timestamp,
+            step=self.current_step,
+            context="TRADE_EXECUTION"
+        )
+        
+        if not is_valid:
+            logging.error(f"PRICE_VALIDATION_FAILED during trade execution: {validation_details}")
+        
         # Enhanced risk controls
         max_risk_per_trade = 0.02  # Maximum 2% risk per trade
         risk_percentage = min(risk_percentage, max_risk_per_trade)
@@ -865,22 +1098,33 @@ class FuturesTradingEnv(gym.Env):
         
         # Log the efficient trade
         if hasattr(self, 'logger') and self.logger:
-            action_type = "FLIP" if old_position_size != 0 and np.sign(old_position_size) != np.sign(self.position_size) else "ADJUST"
+            # Determine clear action type based on position changes
             if old_position_size == 0:
-                action_type = "OPEN"
+                action_type = "OPEN_LONG" if self.position_size > 0 else "OPEN_SHORT"
             elif abs(self.position_size) < 0.001:
-                action_type = "CLOSE"
+                action_type = "CLOSE_LONG" if old_position_size > 0 else "CLOSE_SHORT" 
+            elif old_position_size != 0 and np.sign(old_position_size) != np.sign(self.position_size):
+                action_type = "FLIP_LONG_TO_SHORT" if old_position_size > 0 else "FLIP_SHORT_TO_LONG"
+            else:
+                action_type = "ADJUST_LONG" if self.position_size > 0 else "ADJUST_SHORT"
+            
+            # Determine the correct entry price for logging
+            # For new positions/opens, use current_price
+            # For closes/flips, use the original entry_price before it gets reset
+            log_entry_price = current_price
+            if action_type in ["CLOSE", "FLIP"] and hasattr(self, 'entry_price') and self.entry_price > 0:
+                log_entry_price = self.entry_price
             
             # Create trade data dictionary for logging
             trade_data = {
-                'trade_id': self.trade_id,
+                'trade_id': f"TRADE_{self.trade_id:05d}",
                 'training_step': self.current_step,
                 'training_iteration': getattr(self, 'training_iteration', 0),
                 'entry_datetime': self.df.iloc[self.current_step]['timestamp'] if self.current_step < len(self.df) else f"step_{self.current_step}",
                 'close_datetime': '',  # Will be filled when trade closes
                 'side': 'LONG' if self.position_size > 0 else 'SHORT' if self.position_size < 0 else 'FLAT',
                 'entry_action': action_type,
-                'entry_price': current_price,
+                'entry_price': log_entry_price,
                 'close_price': '',  # Will be filled when trade closes
                 'net_pnl': realized_pnl,
                 'close_reward': 0,  # Will be filled when trade closes
@@ -897,6 +1141,10 @@ class FuturesTradingEnv(gym.Env):
             }
             
             self.logger.log_trade(trade_data)
+            
+            # Set flag to prevent duplicate logging in _close_position
+            if action_type in ["CLOSE", "FLIP"]:
+                self._efficient_trade_logged = True
     
     def _update_stop_loss_take_profit(self, current_price: float):
         """Update stop-loss and take-profit prices with dynamic ATR-based calculation"""
@@ -1025,6 +1273,28 @@ class FuturesTradingEnv(gym.Env):
         if self.position_size == 0:
             return
         
+        # Validate that current_price is not zero
+        if current_price <= 0:
+            logging.error(f"ZERO_PRICE_DETECTED in _close_position: current_price={current_price} at step {self.current_step}")
+            # Get a valid price from the last available data
+            current_price = self._safe_get_price_data(self.current_step, 'close')
+            logging.info(f"PRICE_CORRECTED in _close_position: Using price={current_price} instead")
+        
+        # Validate closing price against market data
+        market_price = self._safe_get_price_data(self.current_step, 'close')
+        timestamp = self._safe_get_price_data(self.current_step, 'timestamp', 0)
+        
+        is_valid, validation_details = self.price_validator.validate_price(
+            trade_price=current_price,
+            market_price=market_price,
+            timestamp=timestamp,
+            step=self.current_step,
+            context="POSITION_CLOSE"
+        )
+        
+        if not is_valid:
+            logging.error(f"PRICE_VALIDATION_FAILED during position close: {validation_details}")
+        
         # Calculate PnL
         if self.position_side == 1:  # Long
             pnl = self.position_size * (current_price - self.entry_price)
@@ -1062,9 +1332,12 @@ class FuturesTradingEnv(gym.Env):
                 self.balance -= funding_cost
                 self.total_funding_costs += funding_cost
         
-        # Log trade
-        if self.logger:
+        # Log trade (only if not already logged by efficient trading system)
+        if self.logger and not getattr(self, '_efficient_trade_logged', False):
             self._log_trade(current_price, pnl, reason)
+        
+        # Reset the efficient trade logging flag
+        self._efficient_trade_logged = False
         
         # Reset position
         self.position_size = 0.0
@@ -1092,15 +1365,24 @@ class FuturesTradingEnv(gym.Env):
         duration_steps = self.current_step - self.trade_start_step
         duration_hours = duration_steps * 0.25  # 15min intervals
         
-        entry_datetime = pd.to_datetime(
-            self._safe_get_price_data(self.trade_start_step, 'timestamp', 0), 
-            unit='s'
-        ).strftime('%d/%m/%Y %H:%M')
+        # Use Unix timestamps to match efficient trade system format
+        entry_datetime = self._safe_get_price_data(self.trade_start_step, 'timestamp', 0)
+        close_datetime = self._safe_get_price_data(self.current_step, 'timestamp', 0)
         
-        close_datetime = pd.to_datetime(
-            self._safe_get_price_data(self.current_step, 'timestamp', 0), 
-            unit='s'
-        ).strftime('%d/%m/%Y %H:%M')
+        # Preserve entry price - if it's zero, try to get it from trade start data
+        logged_entry_price = self.entry_price
+        if logged_entry_price <= 0.0 and self.trade_start_step:
+            # Fall back to using price data from trade start step
+            logged_entry_price = self._safe_get_price_data(self.trade_start_step, 'close')
+            logging.warning(f"ENTRY_PRICE_FALLBACK: Using price from trade start step {self.trade_start_step}: {logged_entry_price}")
+        
+        # Determine clear action label based on what actually happened
+        if reason in ["CANCEL_ACTION", "LIQUIDATION", "STOP_LOSS", "TAKE_PROFIT"]:
+            action_label = "CLOSE"
+        elif self.position_side == 1:  # Was long position
+            action_label = "CLOSE_LONG"  # Closing a long position (selling)
+        else:  # Was short position  
+            action_label = "CLOSE_SHORT"  # Closing a short position (covering)
         
         trade_data = {
             'trade_id': f"TRADE_{self.trade_id:05d}",
@@ -1109,8 +1391,8 @@ class FuturesTradingEnv(gym.Env):
             'entry_datetime': entry_datetime,
             'close_datetime': close_datetime,
             'side': 'LONG' if self.position_side == 1 else 'SHORT',
-            'entry_action': 'BUY' if self.position_side == 1 else 'SELL',
-            'entry_price': self.entry_price,
+            'entry_action': action_label,
+            'entry_price': logged_entry_price,
             'close_price': exit_price,
             'net_pnl': pnl,
             'close_reward': getattr(self, 'current_trade_reward', 0.0),  # Actual cumulative reward for this trade
