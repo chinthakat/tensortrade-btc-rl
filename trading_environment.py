@@ -1517,6 +1517,9 @@ class FuturesTradingEnv(gym.Env):
                     # Increment trade ID for the new position
                     self.trade_id += 1
                     
+                    # CRITICAL FIX: Reset trade_start_step for the new trade
+                    self.trade_start_step = self.current_step
+                    
                     # Log the OPEN of the new position (new trade starts with 0 duration)
                     open_action_type = "OPEN_LONG" if final_position_size_for_logging > 0 else "OPEN_SHORT"
                     open_trade_data = {
@@ -1540,7 +1543,7 @@ class FuturesTradingEnv(gym.Env):
                         'fees_paid': trading_fee * 0.5,  # Split fee between close and open
                         'stop_loss_price': getattr(self, 'stop_loss_price', ''),
                         'take_profit_price': getattr(self, 'take_profit_price', ''),
-                        'close_reason': open_action_type
+                        'close_reason': ''  # New OPEN trade has no close reason yet
                     }
                     self.logger.log_trade(open_trade_data)
                     
@@ -1564,23 +1567,42 @@ class FuturesTradingEnv(gym.Env):
             
             # Calculate trade duration for closing trades
             if action_type in ["CLOSE_LONG", "CLOSE_SHORT"]:
-                duration_steps = self.current_step - (self.trade_start_step or self.current_step)
-                duration_hours = duration_steps * 0.25  # 15min intervals
+                # DURATION FIX: Ensure we have a valid trade_start_step
+                if self.trade_start_step is not None and self.trade_start_step <= self.current_step:
+                    duration_steps = self.current_step - self.trade_start_step
+                    duration_hours = duration_steps * 0.25  # 15min intervals
+                else:
+                    # Fallback: if trade_start_step is invalid, assume 1 step minimum
+                    duration_hours = 0.25  # Minimum 15 minutes
+                    logging.debug(f"DURATION_FALLBACK: trade_start_step={self.trade_start_step}, using minimum duration")
             else:
                 duration_hours = 0  # New trades start with 0 duration
+            
+            # Determine the correct entry datetime
+            # For new positions/opens, use current timestamp
+            # For adjusts/closes, use the original entry timestamp if available
+            if action_type in ["OPEN_LONG", "OPEN_SHORT"]:
+                entry_datetime = self.df.iloc[self.current_step]['timestamp'] if self.current_step < len(self.df) else f"step_{self.current_step}"
+            else:
+                # For ADJUST/CLOSE, try to preserve the original entry time
+                if hasattr(self, 'trade_start_step') and self.trade_start_step is not None and self.trade_start_step < len(self.df):
+                    entry_datetime = self.df.iloc[self.trade_start_step]['timestamp']
+                else:
+                    # Fallback to current timestamp if original not available
+                    entry_datetime = self.df.iloc[self.current_step]['timestamp'] if self.current_step < len(self.df) else f"step_{self.current_step}"
             
             # Create trade data dictionary for logging
             trade_data = {
                 'trade_id': f"TRADE_{self.trade_id:05d}",
                 'training_step': self.current_step,
                 'training_iteration': getattr(self, 'training_iteration', 0),
-                'entry_datetime': self.df.iloc[self.current_step]['timestamp'] if self.current_step < len(self.df) else f"step_{self.current_step}",
+                'entry_datetime': entry_datetime,
                 'close_datetime': self.df.iloc[self.current_step]['timestamp'] if action_type in ["CLOSE_LONG", "CLOSE_SHORT"] else '',  # Set close datetime for closed trades
                 'side': 'LONG' if final_position_size_for_logging > 0 else 'SHORT' if final_position_size_for_logging < 0 else 'FLAT',
                 'entry_action': action_type,
                 'entry_price': log_entry_price,
                 'close_price': current_price if action_type in ["CLOSE_LONG", "CLOSE_SHORT"] else '',  # Set price for closed trades
-                'net_pnl': realized_pnl,
+                'net_pnl': realized_pnl if action_type in ["CLOSE_LONG", "CLOSE_SHORT"] else 0.0,  # Only show PnL on trade closure
                 'close_reward': 0,  # Will be filled when trade closes
                 'entry_net_worth': self.equity,
                 'close_net_worth': self.equity,
@@ -1591,7 +1613,7 @@ class FuturesTradingEnv(gym.Env):
                 'fees_paid': trading_fee,
                 'stop_loss_price': getattr(self, 'stop_loss_price', ''),
                 'take_profit_price': getattr(self, 'take_profit_price', ''),
-                'close_reason': action_type
+                'close_reason': action_type if action_type in ["CLOSE_LONG", "CLOSE_SHORT"] else ''  # Only show close reason when trade is actually closed
             }
             
             self.logger.log_trade(trade_data)
