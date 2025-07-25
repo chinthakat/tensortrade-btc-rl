@@ -1,0 +1,304 @@
+================================================================================
+TRADE ANOMALY ANALYSIS REPORT
+================================================================================
+Generated: 2025-07-24 23:24:32
+Market Data: data/BTC_SYNTHETIC_MIXED_15m_2024-01-01_to_2024-12-31.csv
+Trade File: episodes\episode_01_20250724_220346\logs\trades_episode_01_20250724_220346_env0.csv
+
+SUMMARY STATISTICS
+----------------------------------------
+Total Trades Analyzed: 31,458
+Entry Price Anomalies: 21 (0.07%)
+Close Price Anomalies: 0 (0.00%)
+Trades Without Market Data: 0
+
+ENTRY PRICE DIFFERENCE STATISTICS
+----------------------------------------
+Mean Difference: 0.0319%
+Median Difference: 0.0000%
+Max Difference: 100.0000%
+95th Percentile: 0.0000%
+
+CLOSE PRICE DIFFERENCE STATISTICS
+----------------------------------------
+Mean Difference: 0.0000%
+Median Difference: 0.0000%
+Max Difference: 0.0000%
+95th Percentile: 0.0000%
+
+DETAILED ANOMALY REPORT
+----------------------------------------
+
+ANOMALY #1
+Trade ID: ACTION_STATS_1000
+Side: HOLD:322/941
+Status: Total actions: 941
+Entry Time: 2024-01-10 23:00:00
+
+  ENTRY_PRICE_ANOMALY:
+    Trade Price: $0.00
+    Market Price: $38,946.44
+    Difference: 100.0000%
+    Timestamp: 2024-01-10 23:00:00
+
+----------------------------------------
+ANOMALY #2
+Trade ID: ACTION_STATS_2000
+Side: HOLD:717/1941
+Status: Total actions: 1941
+Entry Time: 2024-01-21 09:00:00
+
+  ENTRY_PRICE_ANOMALY:
+    Trade Price: $0.00
+    Market Price: $31,100.04
+    Difference: 100.0000%
+    Timestamp: 2024-01-21 09:00:00
+
+----------------------------------------
+ANOMALY #3
+Trade ID: TRADE_01136
+Side: FLAT
+Status: CLOSED
+Entry Time: 2024-01-31 01:15:00
+
+  ENTRY_PRICE_ANOMALY:
+    Trade Price: $30,307.84
+    Market Price: $30,730.72
+    Difference: 1.3761%
+    Timestamp: 2024-01-31 01:15:00
+
+----------------------------------------
+ANOMALY #4
+Trade ID: ACTION_STATS_3000
+Side: HOLD:1095/2941
+Status: Total actions: 2941
+Entry Time: 2024-01-31 19:00:00
+
+  ENTRY_PRICE_ANOMALY:
+    Trade Price: $0.00
+    Market Price: $31,368.61
+    Difference: 100.0000%
+    Timestamp: 2024-01-31 19:00:00
+
+----------------------------------------
+ANOMALY #5
+Trade ID: TRADE_01269
+Side: FLAT
+Status: CLOSED
+Entry Time: 2024-02-03 12:45:00
+
+  ENTRY_PRICE_ANOMALY:
+    Trade Price: $35,812.54
+    Market Price: $35,425.20
+    Difference: 1.0934%
+    Timestamp: 2024-02-03 12:45:00
+
+----------------------------------------
+ANOMALY #6
+Trade ID: ACTION_STATS_4000
+Side: HOLD:1479/3941
+Status: Total actions: 3941
+Entry Time: 2024-02-11 05:00:00
+
+  ENTRY_PRICE_ANOMALY:
+    Trade Price: $0.00
+    Market Price: $29,545.49
+    Difference: 100.0000%
+    Timestamp: 2024-02-11 05:00:00
+
+----------------------------------------
+ANOMALY #7
+Trade ID: ACTION_STATS_5000
+Side: HOLD:1828/4941
+Status: Total actions: 4941
+Entry Time: 2024-02-21 15:00:00
+
+  ENTRY_PRICE_ANOMALY:
+    Trade Price: $0.00
+    Market Price: $21,685.39
+    Difference: 100.0000%
+    Timestamp: 2024-02-21 15:00:00
+
+----------------------------------------
+ANOMALY #8
+Trade ID: ACTION_STATS_6000
+Side: HOLD:2160/5941
+Status: Total actions: 5941
+Entry Time: 2024-03-03 01:00:00
+
+  ENTRY_PRICE_ANOMALY:
+    Trade Price: $0.00
+    Market Price: $22,594.06
+    Difference: 100.0000%
+    Timestamp: 2024-03-03 01:00:00
+
+----------------------------------------
+ANOMALY #9
+Trade ID: TRADE_02790
+Side: FLAT
+Status: CLOSED
+Entry Time: 2024-03-11 17:00:00
+
+  ENTRY_PRICE_ANOMALY:
+    Trade Price: $16,161.63
+    Market Price: $16,328.36
+    Difference: 1.0211%
+    Timestamp: 2024-03-11 17:00:00
+
+----------------------------------------
+ANOMALY #10
+Trade ID: ACTION_STATS_7000
+Side: HOLD:2518/6941
+Status: Total actions: 6941
+Entry Time: 2024-03-13 11:00:00
+
+  ENTRY_PRICE_ANOMALY:
+    Trade Price: $0.00
+    Market Price: $15,378.84
+    Difference: 100.0000%
+    Timestamp: 2024-03-13 11:00:00
+
+----------------------------------------
+ANOMALY #11
+Trade ID: TRADE_03267
+Side: FLAT
+Status: CLOSED
+Entry Time: 2024-03-23 17:15:00
+
+  ENTRY_PRICE_ANOMALY:
+    Trade Price: $16,615.36
+    Market Price: $16,802.37
+    Difference: 1.1130%
+    Timestamp: 2024-03-23 17:15:00
+
+----------------------------------------
+ANOMALY #12
+Trade ID: ACTION_STATS_8000
+Side: HOLD:2844/7941
+Status: Total actions: 7941
+Entry Time: 2024-03-23 21:00:00
+
+  ENTRY_PRICE_ANOMALY:
+    Trade Price: $0.00
+    Market Price: $16,115.86
+    Difference: 100.0000%
+    Timestamp: 2024-03-23 21:00:00
+
+----------------------------------------
+ANOMALY #13
+Trade ID: TRADE_03494
+Side: FLAT
+Status: CLOSED
+Entry Time: 2024-03-29 11:30:00
+
+  ENTRY_PRICE_ANOMALY:
+    Trade Price: $13,135.58
+    Market Price: $12,993.79
+    Difference: 1.0912%
+    Timestamp: 2024-03-29 11:30:00
+
+----------------------------------------
+ANOMALY #14
+Trade ID: TRADE_03496
+Side: FLAT
+Status: CLOSED
+Entry Time: 2024-03-29 16:00:00
+
+  ENTRY_PRICE_ANOMALY:
+    Trade Price: $12,405.65
+    Market Price: $12,244.21
+    Difference: 1.3185%
+    Timestamp: 2024-03-29 16:00:00
+
+----------------------------------------
+ANOMALY #15
+Trade ID: TRADE_03510
+Side: FLAT
+Status: CLOSED
+Entry Time: 2024-03-30 00:15:00
+
+  ENTRY_PRICE_ANOMALY:
+    Trade Price: $13,425.41
+    Market Price: $13,613.14
+    Difference: 1.3790%
+    Timestamp: 2024-03-30 00:15:00
+
+----------------------------------------
+ANOMALY #16
+Trade ID: TRADE_03562
+Side: FLAT
+Status: CLOSED
+Entry Time: 2024-03-31 10:00:00
+
+  ENTRY_PRICE_ANOMALY:
+    Trade Price: $13,925.52
+    Market Price: $14,104.85
+    Difference: 1.2714%
+    Timestamp: 2024-03-31 10:00:00
+
+----------------------------------------
+ANOMALY #17
+Trade ID: ACTION_STATS_9000
+Side: HOLD:3198/8941
+Status: Total actions: 8941
+Entry Time: 2024-04-03 07:00:00
+
+  ENTRY_PRICE_ANOMALY:
+    Trade Price: $0.00
+    Market Price: $14,057.25
+    Difference: 100.0000%
+    Timestamp: 2024-04-03 07:00:00
+
+----------------------------------------
+ANOMALY #18
+Trade ID: TRADE_03836
+Side: FLAT
+Status: CLOSED
+Entry Time: 2024-04-07 05:30:00
+
+  ENTRY_PRICE_ANOMALY:
+    Trade Price: $13,008.78
+    Market Price: $12,856.92
+    Difference: 1.1812%
+    Timestamp: 2024-04-07 05:30:00
+
+----------------------------------------
+ANOMALY #19
+Trade ID: TRADE_03848
+Side: FLAT
+Status: CLOSED
+Entry Time: 2024-04-07 19:00:00
+
+  ENTRY_PRICE_ANOMALY:
+    Trade Price: $14,266.56
+    Market Price: $14,447.63
+    Difference: 1.2533%
+    Timestamp: 2024-04-07 19:00:00
+
+----------------------------------------
+ANOMALY #20
+Trade ID: TRADE_03934
+Side: FLAT
+Status: CLOSED
+Entry Time: 2024-04-10 02:45:00
+
+  ENTRY_PRICE_ANOMALY:
+    Trade Price: $16,757.48
+    Market Price: $16,556.71
+    Difference: 1.2126%
+    Timestamp: 2024-04-10 02:45:00
+
+----------------------------------------
+ANOMALY #21
+Trade ID: TRADE_03993
+Side: FLAT
+Status: CLOSED
+Entry Time: 2024-04-11 22:30:00
+
+  ENTRY_PRICE_ANOMALY:
+    Trade Price: $16,520.07
+    Market Price: $16,804.88
+    Difference: 1.6948%
+    Timestamp: 2024-04-11 22:30:00
+
+----------------------------------------
