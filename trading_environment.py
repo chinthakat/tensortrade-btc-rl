@@ -729,6 +729,8 @@ class FuturesTradingEnv(gym.Env):
         self.position_size = 0.0  # In base currency (BTC)
         self.position_side = 0  # 1 for long, -1 for short, 0 for flat
         self.entry_price = 0.0
+        self.trade_entry_price = 0.0  # Store original entry price for trade logging consistency
+        self.entry_equity = 0.0  # Store equity at trade entry for consistent net worth tracking
         self.margin_used = 0.0
         self.unrealized_pnl = 0.0
         self.leverage = 0.0
@@ -743,7 +745,9 @@ class FuturesTradingEnv(gym.Env):
         
         # Trade tracking
         self.trade_id = 0
+        self.episode_id = getattr(self, 'episode_id', 0) + 1  # Increment episode ID on each reset
         self.trade_start_step = None
+        self.trade_entry_datetime = None  # Store original entry datetime for consistent logging
         self.entry_equity = 0.0
         self.total_fees = 0.0
         self.total_funding_costs = 0.0
@@ -804,6 +808,10 @@ class FuturesTradingEnv(gym.Env):
         info = self._get_info()
         
         return observation, info
+    
+    def _get_unique_trade_id(self):
+        """Generate a unique trade ID that includes episode information"""
+        return f"EP{self.episode_id:03d}_TRADE_{self.trade_id:05d}"
     
     def step(self, action) -> Tuple[Dict, float, bool, bool, Dict]:
         """Execute one step in the environment"""
@@ -998,18 +1006,18 @@ class FuturesTradingEnv(gym.Env):
                         cancel_duration_hours = cancel_duration_steps * 0.25  # 15min intervals
                         
                         trade_data = {
-                            'trade_id': f"TRADE_{self.trade_id:05d}",  # Same ID as open trade
+                            'trade_id': self._get_unique_trade_id(),  # Same ID as open trade
                             'training_step': self.current_step,
                             'training_iteration': getattr(self, 'training_iteration', 0),
-                            'entry_datetime': self._safe_get_df_data(self.trade_start_step or self.current_step, 'timestamp', f"step_{self.trade_start_step or self.current_step}"),
+                            'entry_datetime': self.trade_entry_datetime or self._safe_get_df_data(self.trade_start_step or self.current_step, 'timestamp', f"step_{self.trade_start_step or self.current_step}"),
                             'close_datetime': self._safe_get_df_data(self.current_step, 'timestamp', f"step_{self.current_step}"),
                             'side': 'FLAT',
                             'entry_action': 'CANCEL_CLOSE',
-                            'entry_price': self.entry_price,
-                            'close_price': current_price,
-                            'net_pnl': pnl,
+                            'entry_price': round(self.trade_entry_price or self.entry_price, 4),  # Use stored trade entry price
+                            'close_price': round(current_price, 4),
+                            'net_pnl': round(pnl, 6),
                             'close_reward': 0,
-                            'entry_net_worth': self.equity,
+                            'entry_net_worth': getattr(self, 'entry_equity', self.equity),  # Use stored entry equity
                             'close_net_worth': self.equity,
                             'trade_duration_hours': cancel_duration_hours,
                             'status': 'CLOSED',
@@ -1028,12 +1036,14 @@ class FuturesTradingEnv(gym.Env):
                 self.position_size = 0.0
                 self.position_side = 0
                 self.entry_price = 0.0
+                self.trade_entry_price = 0.0  # Reset trade entry price
                 self.margin_used = 0.0
                 self.unrealized_pnl = 0.0
                 self.stop_loss_price = None
                 self.take_profit_price = None
                 self.liquidation_price = None
                 self.trade_start_step = None
+                self.trade_entry_datetime = None  # Reset entry datetime when position closes
             else:
                 # Execute BUY/SELL action
                 self._execute_action(leverage, risk_percentage, current_price)
@@ -1454,6 +1464,11 @@ class FuturesTradingEnv(gym.Env):
                 if old_position_size == 0:  # True new position, not a flip
                     self.trade_id += 1
                 self.trade_start_step = self.current_step
+                # CRITICAL FIX: Store the original entry datetime for consistent logging
+                self.trade_entry_datetime = self.df.iloc[self.current_step]['timestamp'] if self.current_step < len(self.df) else f"step_{self.current_step}"
+                # CRITICAL FIX: Store the original entry price for trade logging consistency
+                self.trade_entry_price = current_price
+                # Store equity at trade entry for consistent net worth tracking
                 self.entry_equity = self.equity
                 # Reset reward accumulation for new trade
                 self.current_trade_reward = 0.0
@@ -1490,10 +1505,10 @@ class FuturesTradingEnv(gym.Env):
                     # Log the CLOSE of the old position first
                     close_action_type = "CLOSE_LONG" if old_position_size > 0 else "CLOSE_SHORT"
                     close_trade_data = {
-                        'trade_id': f"TRADE_{self.trade_id:05d}",
+                        'trade_id': self._get_unique_trade_id(),
                         'training_step': self.current_step,
                         'training_iteration': getattr(self, 'training_iteration', 0),
-                        'entry_datetime': self.df.iloc[self.current_step]['timestamp'] if self.current_step < len(self.df) else f"step_{self.current_step}",
+                        'entry_datetime': self.trade_entry_datetime or (self.df.iloc[self.current_step]['timestamp'] if self.current_step < len(self.df) else f"step_{self.current_step}"),
                         'close_datetime': self.df.iloc[self.current_step]['timestamp'] if self.current_step < len(self.df) else f"step_{self.current_step}",
                         'side': 'FLAT',
                         'entry_action': close_action_type,
@@ -1501,7 +1516,7 @@ class FuturesTradingEnv(gym.Env):
                         'close_price': current_price,
                         'net_pnl': realized_pnl,
                         'close_reward': 0,
-                        'entry_net_worth': self.equity,
+                        'entry_net_worth': getattr(self, 'entry_equity', self.equity),  # Use stored entry equity
                         'close_net_worth': self.equity,
                         'trade_duration_hours': close_duration_hours,
                         'status': 'CLOSED',
@@ -1520,10 +1535,17 @@ class FuturesTradingEnv(gym.Env):
                     # CRITICAL FIX: Reset trade_start_step for the new trade
                     self.trade_start_step = self.current_step
                     
+                    # CRITICAL FIX: Reset entry datetime for the new trade
+                    self.trade_entry_datetime = self.df.iloc[self.current_step]['timestamp'] if self.current_step < len(self.df) else f"step_{self.current_step}"
+                    # CRITICAL FIX: Store the original entry price for trade logging consistency  
+                    self.trade_entry_price = current_price
+                    # Store equity at trade entry for consistent net worth tracking
+                    self.entry_equity = self.equity
+                    
                     # Log the OPEN of the new position (new trade starts with 0 duration)
                     open_action_type = "OPEN_LONG" if final_position_size_for_logging > 0 else "OPEN_SHORT"
                     open_trade_data = {
-                        'trade_id': f"TRADE_{self.trade_id:05d}",
+                        'trade_id': self._get_unique_trade_id(),
                         'training_step': self.current_step,
                         'training_iteration': getattr(self, 'training_iteration', 0),
                         'entry_datetime': self.df.iloc[self.current_step]['timestamp'] if self.current_step < len(self.df) else f"step_{self.current_step}",
@@ -1534,7 +1556,7 @@ class FuturesTradingEnv(gym.Env):
                         'close_price': '',
                         'net_pnl': 0.0,  # New position starts with zero PnL
                         'close_reward': 0,
-                        'entry_net_worth': self.equity,
+                        'entry_net_worth': self.equity,  # For new trades, current equity is the entry equity
                         'close_net_worth': self.equity,
                         'trade_duration_hours': 0,  # New trade starts with 0 duration
                         'status': 'OPEN',
@@ -1560,10 +1582,10 @@ class FuturesTradingEnv(gym.Env):
             # Standard single-trade logging for non-FLIP operations
             # Determine the correct entry price for logging
             # For new positions/opens, use current_price
-            # For closes, use the original entry_price before it gets reset
+            # For closes, use the original trade_entry_price to preserve consistency
             log_entry_price = current_price
-            if action_type in ["CLOSE_LONG", "CLOSE_SHORT"] and hasattr(self, 'entry_price') and self.entry_price > 0:
-                log_entry_price = self.entry_price
+            if action_type in ["CLOSE_LONG", "CLOSE_SHORT"] and hasattr(self, 'trade_entry_price') and self.trade_entry_price > 0:
+                log_entry_price = self.trade_entry_price
             
             # Calculate trade duration for closing trades
             if action_type in ["CLOSE_LONG", "CLOSE_SHORT"]:
@@ -1579,40 +1601,46 @@ class FuturesTradingEnv(gym.Env):
                 duration_hours = 0  # New trades start with 0 duration
             
             # Determine the correct entry datetime
-            # For new positions/opens, use current timestamp
-            # For adjusts/closes, use the original entry timestamp if available
-            if action_type in ["OPEN_LONG", "OPEN_SHORT"]:
+            # CRITICAL FIX: Always use the stored trade_entry_datetime for consistency
+            if hasattr(self, 'trade_entry_datetime') and self.trade_entry_datetime is not None:
+                entry_datetime = self.trade_entry_datetime
+            elif action_type in ["OPEN_LONG", "OPEN_SHORT"]:
+                # For new positions, use current timestamp and store it
                 entry_datetime = self.df.iloc[self.current_step]['timestamp'] if self.current_step < len(self.df) else f"step_{self.current_step}"
+                self.trade_entry_datetime = entry_datetime  # Store for future use in this trade
             else:
-                # For ADJUST/CLOSE, try to preserve the original entry time
+                # Fallback: try to reconstruct from trade_start_step (but DON'T overwrite trade_entry_datetime)
                 if hasattr(self, 'trade_start_step') and self.trade_start_step is not None and self.trade_start_step < len(self.df):
                     entry_datetime = self.df.iloc[self.trade_start_step]['timestamp']
+                    # DO NOT overwrite trade_entry_datetime here - it should persist from original entry
                 else:
-                    # Fallback to current timestamp if original not available
+                    # Last resort fallback (also don't overwrite)
                     entry_datetime = self.df.iloc[self.current_step]['timestamp'] if self.current_step < len(self.df) else f"step_{self.current_step}"
             
             # Create trade data dictionary for logging
             trade_data = {
-                'trade_id': f"TRADE_{self.trade_id:05d}",
+                'trade_id': self._get_unique_trade_id(),
                 'training_step': self.current_step,
                 'training_iteration': getattr(self, 'training_iteration', 0),
                 'entry_datetime': entry_datetime,
                 'close_datetime': self.df.iloc[self.current_step]['timestamp'] if action_type in ["CLOSE_LONG", "CLOSE_SHORT"] else '',  # Set close datetime for closed trades
                 'side': 'LONG' if final_position_size_for_logging > 0 else 'SHORT' if final_position_size_for_logging < 0 else 'FLAT',
                 'entry_action': action_type,
-                'entry_price': log_entry_price,
-                'close_price': current_price if action_type in ["CLOSE_LONG", "CLOSE_SHORT"] else '',  # Set price for closed trades
-                'net_pnl': realized_pnl if action_type in ["CLOSE_LONG", "CLOSE_SHORT"] else 0.0,  # Only show PnL on trade closure
+                'entry_price': round(log_entry_price, 4),  # Round to 4 decimal places for precision
+                'close_price': round(current_price, 4) if action_type in ["CLOSE_LONG", "CLOSE_SHORT"] else '',  # Round and set price for closed trades
+                'net_pnl': round(realized_pnl, 6) if action_type in ["CLOSE_LONG", "CLOSE_SHORT"] else 0.0,  # Round PnL and only show on trade closure
                 'close_reward': 0,  # Will be filled when trade closes
-                'entry_net_worth': self.equity,
+                'entry_net_worth': getattr(self, 'entry_equity', self.equity),  # Use stored entry equity
                 'close_net_worth': self.equity,
                 'trade_duration_hours': duration_hours,
                 'status': 'OPEN' if abs(final_position_size_for_logging) > 0.001 else 'CLOSED',
-                'win_loss': 'WIN' if realized_pnl > 0 else 'LOSS' if realized_pnl < 0 else 'NEUTRAL',
+                'win_loss': 'WIN' if realized_pnl > 0 and action_type in ["CLOSE_LONG", "CLOSE_SHORT"] else 'LOSS' if realized_pnl < 0 and action_type in ["CLOSE_LONG", "CLOSE_SHORT"] else 'NEUTRAL',
                 'position_size': final_position_size_for_logging,  # Use the intended position size, not the validated one
                 'fees_paid': trading_fee,
                 'stop_loss_price': getattr(self, 'stop_loss_price', ''),
                 'take_profit_price': getattr(self, 'take_profit_price', ''),
+                'entry_signal': action_type if action_type in ["OPEN_LONG", "OPEN_SHORT"] else '',  # Entry signal for opening trades
+                'exit_signal': action_type if action_type in ["CLOSE_LONG", "CLOSE_SHORT"] else '',  # Exit signal for closing trades
                 'close_reason': action_type if action_type in ["CLOSE_LONG", "CLOSE_SHORT"] else ''  # Only show close reason when trade is actually closed
             }
             
@@ -1973,6 +2001,7 @@ class FuturesTradingEnv(gym.Env):
         self.position_size = 0.0
         self.position_side = 0
         self.entry_price = 0.0
+        self.trade_entry_price = 0.0  # Reset trade entry price
         self.margin_used = 0.0
         self.unrealized_pnl = 0.0
         self.leverage = 0.0
@@ -2021,10 +2050,10 @@ class FuturesTradingEnv(gym.Env):
             
             # Use SAME trade_id to update existing OPEN trade record
             trade_data = {
-                'trade_id': f"TRADE_{self.trade_id:05d}",  # SAME ID as the open trade
+                'trade_id': self._get_unique_trade_id(),  # SAME ID as the open trade
                 'training_step': self.current_step,
                 'training_iteration': getattr(self, 'training_iteration', 0),
-                'entry_datetime': self._safe_get_df_data(self.trade_start_step or self.current_step, 'timestamp', f"step_{self.trade_start_step or self.current_step}"),
+                'entry_datetime': self.trade_entry_datetime or self._safe_get_df_data(self.trade_start_step or self.current_step, 'timestamp', f"step_{self.trade_start_step or self.current_step}"),
                 'close_datetime': self._safe_get_df_data(self.current_step, 'timestamp', f"step_{self.current_step}"),
                 'side': 'FLAT',  # Position is now closed
                 'entry_action': f"FORCE_CLOSE_{reason}",  # Clear action indicating forced closure
@@ -2032,7 +2061,7 @@ class FuturesTradingEnv(gym.Env):
                 'close_price': current_price,
                 'net_pnl': pnl,
                 'close_reward': 0.0,
-                'entry_net_worth': self.equity,
+                'entry_net_worth': getattr(self, 'entry_equity', self.equity),  # Use stored entry equity
                 'close_net_worth': self.equity,
                 'trade_duration_hours': cleanup_duration_hours,
                 'status': 'CLOSED',  # CRITICAL: Mark as CLOSED, not FORCE_CLOSED
@@ -2053,6 +2082,7 @@ class FuturesTradingEnv(gym.Env):
         self.position_size = 0.0
         self.position_side = 0
         self.entry_price = 0.0
+        self.trade_entry_price = 0.0  # Reset trade entry price
         self.margin_used = 0.0
         self.unrealized_pnl = 0.0
         self.leverage = 0.0
@@ -2086,8 +2116,8 @@ class FuturesTradingEnv(gym.Env):
         duration_steps = self.current_step - self.trade_start_step
         duration_hours = duration_steps * 0.25  # 15min intervals
         
-        # Use Unix timestamps to match efficient trade system format
-        entry_datetime = self._safe_get_price_data(self.trade_start_step, 'timestamp', 0)
+        # Use stored entry datetime for consistency, fallback to timestamp lookup
+        entry_datetime = self.trade_entry_datetime or self._safe_get_price_data(self.trade_start_step, 'timestamp', 0)
         close_datetime = self._safe_get_price_data(self.current_step, 'timestamp', 0)
         
         # Preserve entry price - if it's zero, try to get it from trade start data
@@ -2111,7 +2141,7 @@ class FuturesTradingEnv(gym.Env):
             action_label = "CLOSE_SHORT"  # Closing a short position (covering)
         
         trade_data = {
-            'trade_id': f"TRADE_{self.trade_id:05d}",
+            'trade_id': self._get_unique_trade_id(),
             'training_step': self.current_step,
             'training_iteration': self.training_iteration,
             'entry_datetime': entry_datetime,
@@ -2322,6 +2352,7 @@ class FuturesTradingEnv(gym.Env):
             self.position_size = 0.0
             self.position_side = 0
             self.entry_price = 0.0
+            self.trade_entry_price = 0.0  # Reset trade entry price
             self.margin_used = 0.0
             self.unrealized_pnl = 0.0
             self.leverage = 0.0
