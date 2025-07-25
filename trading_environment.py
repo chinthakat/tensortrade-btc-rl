@@ -975,8 +975,56 @@ class FuturesTradingEnv(gym.Env):
                 # Do nothing - just hold current position
                 pass
             elif action_type == "CANCEL":
-                # CANCEL should be a no-op - just reset to flat position without executing trades
-                episode_logger.info(f"CANCEL_ACTION: Resetting to flat position without executing trades")
+                # CANCEL should close any open position and log the closure
+                if self.position_size != 0:
+                    # Get current price for logging
+                    current_price = self._safe_get_price_data(self.current_step, 'close')
+                    
+                    # Calculate PnL for the cancelled position
+                    if self.position_side == 1:  # Long
+                        pnl = self.position_size * (current_price - self.entry_price)
+                    else:  # Short
+                        pnl = self.position_size * (self.entry_price - current_price)
+                    
+                    # Update balance (minimal fees for CANCEL)
+                    cancel_fee = abs(self.position_size * current_price) * (self.taker_fee * 0.5)  # Reduced fee
+                    self.balance += pnl - cancel_fee
+                    self.total_fees += cancel_fee
+                    self.total_realized_pnl += pnl
+                    
+                    # Log the CANCEL closure
+                    if self.logger:
+                        cancel_duration_steps = self.current_step - (self.trade_start_step or self.current_step)
+                        cancel_duration_hours = cancel_duration_steps * 0.25  # 15min intervals
+                        
+                        trade_data = {
+                            'trade_id': f"TRADE_{self.trade_id:05d}",  # Same ID as open trade
+                            'training_step': self.current_step,
+                            'training_iteration': getattr(self, 'training_iteration', 0),
+                            'entry_datetime': self._safe_get_df_data(self.trade_start_step or self.current_step, 'timestamp', f"step_{self.trade_start_step or self.current_step}"),
+                            'close_datetime': self._safe_get_df_data(self.current_step, 'timestamp', f"step_{self.current_step}"),
+                            'side': 'FLAT',
+                            'entry_action': 'CANCEL_CLOSE',
+                            'entry_price': self.entry_price,
+                            'close_price': current_price,
+                            'net_pnl': pnl,
+                            'close_reward': 0,
+                            'entry_net_worth': self.equity,
+                            'close_net_worth': self.equity,
+                            'trade_duration_hours': cancel_duration_hours,
+                            'status': 'CLOSED',
+                            'win_loss': 'WIN' if pnl > 0 else 'LOSS' if pnl < 0 else 'NEUTRAL',
+                            'position_size': 0.0,  # Position is now closed
+                            'fees_paid': cancel_fee,
+                            'stop_loss_price': '',
+                            'take_profit_price': '',
+                            'close_reason': 'CANCEL_ACTION'
+                        }
+                        self.logger.log_trade(trade_data)
+                        
+                        episode_logger.info(f"CANCEL_CLOSE: Closed trade {self.trade_id:05d} via CANCEL action")
+                
+                # Reset position state
                 self.position_size = 0.0
                 self.position_side = 0
                 self.entry_price = 0.0
@@ -986,7 +1034,6 @@ class FuturesTradingEnv(gym.Env):
                 self.take_profit_price = None
                 self.liquidation_price = None
                 self.trade_start_step = None
-                # No fees, no PnL calculation - just reset state
             else:
                 # Execute BUY/SELL action
                 self._execute_action(leverage, risk_percentage, current_price)
@@ -1924,7 +1971,7 @@ class FuturesTradingEnv(gym.Env):
     def _force_close_position_no_fees(self, current_price: float, reason: str):
         """
         Force close position at episode end without charging fees.
-        This prevents fee accumulation during episode cleanup.
+        CRITICAL FIX: Updates existing OPEN trade instead of creating new entry.
         """
         if self.position_size == 0:
             return
@@ -1944,20 +1991,21 @@ class FuturesTradingEnv(gym.Env):
         self.total_realized_pnl += pnl
         self.last_trade_pnl = pnl
         
-        # Log the forced close (minimal logging for episode cleanup)
+        # CRITICAL FIX: Log closure of existing trade (NOT a new trade)
         if self.logger:
             # Calculate duration for episode cleanup
             cleanup_duration_steps = self.current_step - (self.trade_start_step or self.current_step)
             cleanup_duration_hours = cleanup_duration_steps * 0.25  # 15min intervals
             
+            # Use SAME trade_id to update existing OPEN trade record
             trade_data = {
-                'trade_id': f"EPISODE_END_{self.trade_id:05d}",
+                'trade_id': f"TRADE_{self.trade_id:05d}",  # SAME ID as the open trade
                 'training_step': self.current_step,
                 'training_iteration': getattr(self, 'training_iteration', 0),
-                'entry_datetime': self._safe_get_price_data(self.trade_start_step or self.current_step, 'timestamp', 0),
-                'close_datetime': self._safe_get_price_data(self.current_step, 'timestamp', 0),
-                'side': 'LONG' if self.position_side == 1 else 'SHORT',
-                'entry_action': 'EPISODE_CLEANUP',
+                'entry_datetime': self._safe_get_df_data(self.trade_start_step or self.current_step, 'timestamp', f"step_{self.trade_start_step or self.current_step}"),
+                'close_datetime': self._safe_get_df_data(self.current_step, 'timestamp', f"step_{self.current_step}"),
+                'side': 'FLAT',  # Position is now closed
+                'entry_action': f"FORCE_CLOSE_{reason}",  # Clear action indicating forced closure
                 'entry_price': self.entry_price,
                 'close_price': current_price,
                 'net_pnl': pnl,
@@ -1965,15 +2013,19 @@ class FuturesTradingEnv(gym.Env):
                 'entry_net_worth': self.equity,
                 'close_net_worth': self.equity,
                 'trade_duration_hours': cleanup_duration_hours,
-                'status': 'FORCE_CLOSED',
-                'win_loss': 'CLEANUP',
-                'position_size': abs(self.position_size),
+                'status': 'CLOSED',  # CRITICAL: Mark as CLOSED, not FORCE_CLOSED
+                'win_loss': 'WIN' if pnl > 0 else 'LOSS' if pnl < 0 else 'NEUTRAL',
+                'position_size': 0.0,  # Position is now zero
                 'fees_paid': 0.0,  # NO FEES for episode cleanup
                 'stop_loss_price': '',
                 'take_profit_price': '',
-                'close_reason': reason
+                'close_reason': f"FORCE_CLOSE_{reason}"
             }
             self.logger.log_trade(trade_data)
+            
+            # Log episode cleanup info for debugging
+            episode_logger.info(f"EPISODE_CLEANUP: Closed trade {self.trade_id:05d} at step {self.current_step}")
+            episode_logger.info(f"  Position: {self.position_size:.6f} -> 0.0, PnL: ${pnl:.2f}")
         
         # Reset position completely
         self.position_size = 0.0
