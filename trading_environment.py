@@ -26,12 +26,50 @@ except ImportError:
 try:
     import pandas_ta as ta
 except ImportError:
-    raise ImportError("pandas_ta is required but not installed. Please install with: pip install pandas_ta")
+    try:
+        # Try installing compatible version if import fails
+        import subprocess
+        import sys
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "pandas_ta==0.3.14b0"])
+        import pandas_ta as ta
+    except:
+        raise ImportError("pandas_ta is required but not installed. Please install with: pip install pandas_ta==0.3.14b0")
+except Exception as e:
+    # Handle numpy compatibility issues
+    import warnings
+    warnings.warn(f"pandas_ta import warning: {e}. Using fallback indicators.")
+    # Use fallback technical analysis if pandas_ta fails
+    ta = None
 
 warnings.filterwarnings("ignore")
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# Create separate logger for penalty errors - logs to file only
+penalty_logger = logging.getLogger('penalty_errors')
+penalty_logger.setLevel(logging.ERROR)
+penalty_logger.propagate = False  # Don't propagate to root logger (terminal)
+
+# Create file handler for penalty errors
+os.makedirs('logs', exist_ok=True)
+penalty_file_handler = logging.FileHandler('logs/penalty_errors.log', mode='a')
+penalty_file_handler.setLevel(logging.ERROR)
+penalty_file_formatter = logging.Formatter('%(asctime)s - PENALTY - %(message)s')
+penalty_file_handler.setFormatter(penalty_file_formatter)
+penalty_logger.addHandler(penalty_file_handler)
+
+# Create separate logger for episode maintenance - logs to file only
+episode_logger = logging.getLogger('episode_maintenance')
+episode_logger.setLevel(logging.INFO)
+episode_logger.propagate = False  # Don't propagate to root logger (terminal)
+
+# Create file handler for episode maintenance
+episode_file_handler = logging.FileHandler('logs/episode_maintenance.log', mode='a')
+episode_file_handler.setLevel(logging.INFO)
+episode_file_formatter = logging.Formatter('%(asctime)s - EPISODE - %(message)s')
+episode_file_handler.setFormatter(episode_file_formatter)
+episode_logger.addHandler(episode_file_handler)
 
 class TradingMetrics:
     """Calculate trading performance metrics"""
@@ -605,7 +643,7 @@ class FuturesTradingEnv(gym.Env):
         if df.shape[0] != original_shape[0]:
             logging.warning(f"Unexpected data loss: {original_shape[0] - df.shape[0]} rows lost during processing")
         else:
-            logging.info("✅ Data alignment preserved - no rows lost during preprocessing")
+            logging.info("SUCCESS: Data alignment preserved - no rows lost during preprocessing")
         
         # Select feature columns (SIMPLIFIED 8-CORE MINIMAL SET)
         # This reduces features from 27 to 8 (70% reduction) to solve overtrading
@@ -633,9 +671,9 @@ class FuturesTradingEnv(gym.Env):
             'volume_ratio'     # Volume relative to average
         ]
         
-        logging.info("🎯 USING SIMPLIFIED 8-CORE INDICATOR SET")
-        logging.info("📉 Reduced from 27 to 8 indicators (70% reduction)")
-        logging.info("🚀 This should eliminate overtrading behavior")
+        logging.info("TARGET: USING SIMPLIFIED 8-CORE INDICATOR SET")
+        logging.info("REDUCED: Reduced from 27 to 8 indicators (70% reduction)")
+        logging.info("BOOST: This should eliminate overtrading behavior")
         
         # Check which feature columns are available
         available_cols = [col for col in feature_cols if col in df.columns]
@@ -749,6 +787,17 @@ class FuturesTradingEnv(gym.Env):
         # Episode statistics
         self.episode_trades = 0
         self.episode_profit = 0.0
+        self.episode_total_fees = 0.0  # Track total fees per episode
+        
+        # Initialize penalty tracking variables
+        self.dust_position_penalty = 0.0
+        self.phantom_trade_penalty = 0.0
+        self.invalid_entry_penalty = 0.0
+        self.zero_pnl_detection_penalty = 0.0
+        self.zero_pnl_close_penalty = 0.0
+        self.excessive_modification_penalty = 0.0
+        self.fee_cap_penalty = 0.0
+        self.entry_price_fallback_penalty = 0.0
         
         observation = self._get_observation()
         info = self._get_info()
@@ -808,6 +857,23 @@ class FuturesTradingEnv(gym.Env):
                     leverage = leverage[0]
             else:
                 leverage = action[0] if isinstance(action, (list, np.ndarray)) else action
+            
+            # PENALTY FOR EXTREME LEVERAGE REQUESTS - penalize before clipping
+            original_leverage = float(leverage)
+            extreme_leverage_penalty = 0.0
+            
+            if abs(original_leverage) > self.max_leverage:
+                leverage_excess = abs(original_leverage) / self.max_leverage - 1.0
+                extreme_leverage_penalty = min(leverage_excess * 0.2, 1.0)  # Up to -1.0 penalty
+                # Silent penalty - only log at debug level since penalty is applied
+                logging.debug(f"EXTREME_LEVERAGE_PENALTY: Requested {original_leverage:.1f}x > {self.max_leverage}x limit")
+                logging.debug(f"LEVERAGE_EXCESS_PENALTY: -{extreme_leverage_penalty:.4f} for {leverage_excess*100:.1f}% excess")
+            
+            # Store penalty for reward calculation
+            if not hasattr(self, 'extreme_leverage_penalty'):
+                self.extreme_leverage_penalty = 0.0
+            self.extreme_leverage_penalty = extreme_leverage_penalty
+            
             leverage = float(np.clip(leverage, -self.max_leverage, self.max_leverage))
             
             # Apply trading threshold - treat small leverage as HOLD
@@ -866,26 +932,47 @@ class FuturesTradingEnv(gym.Env):
         # Store previous state
         prev_equity = self.equity
         
-        # Check if we can safely move to next step
+        # EPISODE TERMINATION FIX: Check episode boundary BEFORE any trading actions
         next_step = self.current_step + 1
-        if next_step >= len(self.price_data):
-            # We're at the end of data, use current step prices
+        
+        # If we're at or near the end of data, force episode termination
+        if next_step >= len(self.price_data) - 1:
+            # FORCE EPISODE TERMINATION to prevent infinite loop at boundary
             current_price = self._safe_get_price_data(self.current_step, 'close')
-            current_high = self._safe_get_price_data(self.current_step, 'high', current_price)
-            current_low = self._safe_get_price_data(self.current_step, 'low', current_price)
-        else:
-            # Safe to move to next step - this ensures correct timestep for trade execution
-            self.current_step = next_step
-            current_price = self._safe_get_price_data(self.current_step, 'close')
-            current_high = self._safe_get_price_data(self.current_step, 'high', current_price)
-            current_low = self._safe_get_price_data(self.current_step, 'low', current_price)
+            
+            # Close any open position WITHOUT charging fees (episode cleanup)
+            if self.position_size != 0:
+                self._force_close_position_no_fees(current_price, "EPISODE_END")
+            
+            # Return terminal state immediately - NO MORE TRADING ALLOWED
+            terminated = True
+            truncated = True
+            
+            # Create terminal observation
+            observation = {
+                'market_features': np.zeros((self.window_size, len(self.feature_columns.columns)), dtype=np.float32),
+                'portfolio_features': np.zeros(9, dtype=np.float32)
+            }
+            
+            # Final reward calculation
+            reward = self._calculate_enhanced_reward(prev_equity)
+            info = self._get_info()
+            
+            logging.info(f"EPISODE_TERMINATED at step {self.current_step}: No more trading allowed at episode boundary")
+            return observation, reward, terminated, truncated, info
+        
+        # Safe to continue - move to next step for trading
+        self.current_step = next_step
+        current_price = self._safe_get_price_data(self.current_step, 'close')
+        current_high = self._safe_get_price_data(self.current_step, 'high', current_price)
+        current_low = self._safe_get_price_data(self.current_step, 'low', current_price)
         
         # Validate that current_price is not zero (CRITICAL FIX)
         if current_price <= 0:
             logging.error(f"ZERO_PRICE_DETECTED in step(): current_price={current_price} at step {self.current_step}")
             # Get a valid price from the last available data
             current_price = self._safe_get_price_data(self.current_step, 'close')
-            logging.info(f"PRICE_CORRECTED in step(): Using price={current_price} instead")
+            episode_logger.info(f"PRICE_CORRECTED in step(): Using price={current_price} instead")
             # Also fix current_high and current_low if they're invalid
             if current_high <= 0:
                 current_high = current_price
@@ -1017,7 +1104,7 @@ class FuturesTradingEnv(gym.Env):
             logging.error(f"ZERO_PRICE_DETECTED: current_price={current_price} at step {self.current_step}")
             # Get a valid price from the last available data
             current_price = self._safe_get_price_data(self.current_step, 'close')
-            logging.info(f"PRICE_CORRECTED: Using price={current_price} instead")
+            episode_logger.info(f"PRICE_CORRECTED: Using price={current_price} instead")
         
         # Validate current price against market data
         market_price = self._safe_get_price_data(self.current_step, 'close')
@@ -1079,16 +1166,92 @@ class FuturesTradingEnv(gym.Env):
         # Calculate position size based on risk percentage and leverage
         risk_equity = self.equity * risk_percentage  # Amount of equity to risk
         target_position_value = target_leverage * risk_equity
+        
+        # 🚨 CRITICAL FIX: Limit position value to prevent excessive fees
+        # Maximum position should never exceed available equity * max_leverage
+        max_safe_position_value = self.equity * min(abs(target_leverage), self.max_leverage)
+        
+        # Additional safety: Never allow position value > 50% of available equity at max leverage
+        absolute_max_position = self.equity * self.max_leverage * 0.5
+        max_safe_position_value = min(max_safe_position_value, absolute_max_position)
+        
+        # Apply the safety limit
+        safety_intervention_penalty = 0.0
+        if abs(target_position_value) > max_safe_position_value:
+            intervention_severity = abs(target_position_value) / max_safe_position_value - 1.0
+            safety_intervention_penalty += min(intervention_severity * 0.1, 0.5)  # Up to -0.5 penalty
+            logging.debug(f"POSITION_SIZE_LIMITED: Requested ${abs(target_position_value):.2f}, limited to ${max_safe_position_value:.2f}")
+            logging.debug(f"SAFETY_PENALTY: -{safety_intervention_penalty:.3f} for excessive position request")
+            target_position_value = np.sign(target_position_value) * max_safe_position_value
+        
         target_position_size = target_position_value / current_price if current_price > 0 else 0
         
-        # Additional safety: limit position size to reasonable fraction of equity
-        max_position_value = self.equity * abs(target_leverage) * 0.8  # 80% safety margin
-        if abs(target_position_value) > max_position_value:
-            target_position_value = np.sign(target_position_value) * max_position_value
-            target_position_size = target_position_value / current_price if current_price > 0 else 0
+        # 🚨 EMERGENCY BRAKE: Absolute position size limit (in BTC)
+        # Never allow more than equity/price worth of BTC to be traded
+        max_btc_position = (self.equity * self.max_leverage * 0.2) / current_price  # 20% of max theoretical
+        if abs(target_position_size) > max_btc_position:
+            btc_excess = abs(target_position_size) / max_btc_position - 1.0
+            safety_intervention_penalty += min(btc_excess * 0.2, 1.0)  # Up to -1.0 penalty for extreme BTC requests
+            penalty_logger.error(f"EMERGENCY_POSITION_BRAKE: Position {target_position_size:.6f} BTC > limit {max_btc_position:.6f} BTC at step {getattr(self, 'current_step', 'unknown')}")
+            penalty_logger.error(f"SEVERE_SAFETY_PENALTY: -{min(btc_excess * 0.2, 1.0):.3f} for extreme BTC position")
+            logging.debug(f"EMERGENCY_POSITION_BRAKE: Position {target_position_size:.6f} BTC > limit {max_btc_position:.6f} BTC")
+            target_position_size = np.sign(target_position_size) * max_btc_position
         
         # Calculate trade size needed
         trade_size = target_position_size - self.position_size
+        
+        # 🚨 FINAL SAFETY CHECK: Prevent trades that would cause excessive fees
+        trade_value = abs(trade_size * current_price)
+        estimated_fee = trade_value * self.taker_fee
+        
+        # If fee would be > 1% of equity, reduce trade size
+        max_fee_allowed = self.equity * 0.01  # 1% of equity
+        if estimated_fee > max_fee_allowed:
+            reduction_factor = max_fee_allowed / estimated_fee
+            fee_excess = estimated_fee / max_fee_allowed - 1.0
+            safety_intervention_penalty += min(fee_excess * 0.05, 0.3)  # Up to -0.3 penalty for excessive fees
+            trade_size *= reduction_factor
+            target_position_size = self.position_size + trade_size
+            logging.debug(f"TRADE_SIZE_REDUCED: Fee would be ${estimated_fee:.2f}, reduced by {(1-reduction_factor)*100:.1f}%")
+            logging.debug(f"FEE_SAFETY_PENALTY: -{min(fee_excess * 0.05, 0.3):.3f} for excessive fee attempt")
+            
+        # Store the total safety penalty for the reward calculation
+        if not hasattr(self, 'safety_intervention_penalty'):
+            self.safety_intervention_penalty = 0.0
+        self.safety_intervention_penalty = safety_intervention_penalty
+        
+        # 🧹 DUST POSITION FILTER: Prevent tiny positions that cause chaos
+        min_position_size = 0.001  # Minimum 0.001 BTC (≈$30-50) to be considered a real position
+        
+        # If final position would be dust, round to zero instead
+        if abs(target_position_size) < min_position_size:
+            if abs(target_position_size) > 0:
+                logging.debug(f"DUST_POSITION_FILTERED: Position {target_position_size:.6f} BTC < {min_position_size} BTC minimum, setting to 0")
+                # Apply small penalty for creating dust positions
+                if not hasattr(self, 'dust_position_penalty'):
+                    self.dust_position_penalty = 0.0
+                self.dust_position_penalty += 0.01  # Small penalty to discourage dust creation
+            target_position_size = 0.0
+            trade_size = -self.position_size  # Close existing position completely
+        
+        # If trade would create a dust position, filter it out
+        elif abs(trade_size) > 0 and abs(trade_size * current_price) < 20.0:  # Less than $20 trade
+            logging.debug(f"DUST_TRADE_FILTERED: Trade ${abs(trade_size * current_price):.2f} < $20 minimum, skipping")
+            if not hasattr(self, 'dust_position_penalty'):
+                self.dust_position_penalty = 0.0
+            self.dust_position_penalty += 0.005  # Very small penalty for dust attempts
+            trade_size = 0.0  # No trade
+            target_position_size = self.position_size  # Keep current position
+            
+        # Recalculate final trade value and fee after all safety checks
+        final_trade_value = abs(trade_size * current_price)
+        final_estimated_fee = final_trade_value * self.taker_fee
+        
+        # Log if this is still a large trade for monitoring
+        if final_estimated_fee > 100:
+            logging.info(f"LARGE_TRADE_DETECTED: Trade value=${final_trade_value:.2f}, Fee=${final_estimated_fee:.2f}")
+            logging.info(f"  Position: {self.position_size:.6f} -> {target_position_size:.6f} BTC")
+            logging.info(f"  Leverage: {target_leverage:.2f}x, Risk: {risk_percentage*100:.1f}%")
         
         # Debug logging to understand trading behavior
         if hasattr(self, 'logger') and self.logger and self.current_step % 100 == 0:  # Log every 100 steps
@@ -1128,8 +1291,35 @@ class FuturesTradingEnv(gym.Env):
         """
         trade_size = target_position_size - self.position_size
         
+        # ZERO PnL PREVENTION: Enhanced minimum trade size validation
         if abs(trade_size) < 0.001:
             return  # No significant trade needed
+        
+        # ZERO PnL PREVENTION: Validate target position size is meaningful
+        min_position_value = 1.0  # Minimum $1 position value
+        target_position_value = abs(target_position_size * current_price)
+        if target_position_value < min_position_value and abs(target_position_size) > 0:
+            logging.debug(f"TINY_POSITION_PREVENTED: Position value ${target_position_value:.6f} below minimum ${min_position_value}")
+            return  # Prevent meaningless tiny positions that create zero PnL trades
+        
+        # ADDITIONAL CHECK: Prevent excessive position modifications in same step
+        if hasattr(self, '_last_modification_step') and self._last_modification_step == self.current_step:
+            if hasattr(self, '_modifications_this_step'):
+                self._modifications_this_step += 1
+            else:
+                self._modifications_this_step = 1
+            
+            if self._modifications_this_step > 3:  # Max 3 modifications per step
+                logging.debug(f"EXCESSIVE_MODIFICATIONS: Preventing {self._modifications_this_step}th modification in step {self.current_step}")
+                # Apply penalty for excessive modifications
+                if not hasattr(self, 'excessive_modification_penalty'):
+                    self.excessive_modification_penalty = 0.0
+                self.excessive_modification_penalty += 0.05  # Strong penalty for excessive modifications
+                penalty_logger.error(f"EXCESSIVE_MODIFICATION_PENALTY: step={self.current_step}, modifications={self._modifications_this_step}, penalty=0.05")
+                return
+        else:
+            self._last_modification_step = self.current_step
+            self._modifications_this_step = 1
         
         # Count ANY significant trade execution (BUY/SELL action)
         self.episode_trades += 1
@@ -1137,7 +1327,34 @@ class FuturesTradingEnv(gym.Env):
         # Calculate realized PnL if we have an existing position being modified
         realized_pnl = 0.0
         
+        # ZERO PnL PREVENTION: Validate prices before calculating PnL
+        if current_price <= 0 or np.isnan(current_price):
+            logging.error(f"ZERO_PNL_PREVENTION: Invalid current_price={current_price} at step {self.current_step}")
+            return  # Abort trade to prevent zero PnL phantom execution
+        
+        # ZERO PnL PREVENTION: Validate position size is not NaN
+        if np.isnan(target_position_size):
+            logging.error(f"ZERO_PNL_PREVENTION: NaN target_position_size at step {self.current_step}")
+            return  # Abort trade to prevent invalid execution
+        
         if self.position_size != 0:
+            # ZERO PnL PREVENTION: Validate existing position has valid entry price
+            if self.entry_price <= 0 or np.isnan(self.entry_price):
+                # Silent penalty - only log at debug level since penalty is applied
+                logging.debug(f"ZERO_PNL_PREVENTION: Existing position has invalid entry_price={self.entry_price}")
+                # EMERGENCY FIX: Set entry price to current price to prevent zero PnL
+                self.entry_price = current_price
+                episode_logger.info(f"EMERGENCY_ENTRY_PRICE_FIX: Set entry_price to current_price={current_price}")
+                # Apply penalty for causing this emergency fix
+                if not hasattr(self, 'zero_pnl_prevention_penalty'):
+                    self.zero_pnl_prevention_penalty = 0.0
+                self.zero_pnl_prevention_penalty += 0.15  # Heavy penalty for invalid state
+                logging.debug(f"ZERO_PNL_PREVENTION_PENALTY: -{self.zero_pnl_prevention_penalty:.4f} for invalid entry price")
+                # Also ensure trade_start_step is set
+                if not self.trade_start_step:
+                    self.trade_start_step = self.current_step
+                # Continue with trade execution - this is now safe
+            
             # We're modifying an existing position
             if np.sign(target_position_size) != np.sign(self.position_size):
                 # Position flip: calculate PnL on the closed portion
@@ -1145,6 +1362,16 @@ class FuturesTradingEnv(gym.Env):
                     realized_pnl = self.position_size * (current_price - self.entry_price)
                 else:  # Closing short
                     realized_pnl = self.position_size * (self.entry_price - current_price)
+                
+                # ZERO PnL PREVENTION: Validate calculated PnL makes sense
+                if abs(realized_pnl) < 0.001 and abs(current_price - self.entry_price) > 0.001:
+                    logging.debug(f"ZERO_PNL_DETECTED: Suspiciously small PnL={realized_pnl:.6f} despite price movement from {self.entry_price} to {current_price}")
+                    # Apply penalty for zero PnL detection
+                    if not hasattr(self, 'zero_pnl_detection_penalty'):
+                        self.zero_pnl_detection_penalty = 0.0
+                    self.zero_pnl_detection_penalty += 0.025  # Penalty for zero PnL anomaly
+                    penalty_logger.error(f"ZERO_PNL_DETECTION_PENALTY: PnL={realized_pnl:.6f}, price_move={abs(current_price - self.entry_price):.6f}, penalty=0.025")
+                    # Still allow the trade but flag it for investigation
                 
                 # Update realized PnL tracking
                 self.total_realized_pnl += realized_pnl
@@ -1171,7 +1398,32 @@ class FuturesTradingEnv(gym.Env):
         
         # Calculate trading fees on the net trade volume (efficient!)
         trade_value = abs(trade_size * current_price)
-        trading_fee = trade_value * self.taker_fee
+        base_fee = trade_value * self.taker_fee
+        
+        # EMERGENCY FEE CAP: Prevent unrealistic fees (only as safety net for truly broken trades)
+        max_reasonable_fee = trade_value * 0.01  # 1% maximum fee rate
+        trading_fee = min(base_fee, max_reasonable_fee)
+        
+        # DIAGNOSTIC LOGGING: Track high fee scenarios
+        if trading_fee > 100:  # Log any fee over $100
+            logging.error(f"HIGH_FEE_DETECTED: Fee=${trading_fee:.2f} on trade_value=${trade_value:.2f}")
+            logging.error(f"  - trade_size={trade_size:.6f}, current_price=${current_price:.2f}")
+            logging.error(f"  - position_size={self.position_size:.6f} -> {target_position_size:.6f}")
+            logging.error(f"  - step={self.current_step}, taker_fee={self.taker_fee}")
+        
+        # Log when fee cap is applied for debugging
+        if trading_fee < base_fee:
+            logging.debug(f"FEE_CAP_APPLIED at step {self.current_step}: Fee capped from ${base_fee:.2f} to ${trading_fee:.2f} on trade value ${trade_value:.2f}")
+            # Apply penalty for hitting fee cap
+            if not hasattr(self, 'fee_cap_penalty'):
+                self.fee_cap_penalty = 0.0
+            self.fee_cap_penalty += 0.08  # Strong penalty for hitting fee cap
+            penalty_logger.error(f"FEE_CAP_PENALTY: base_fee=${base_fee:.2f}, capped_fee=${trading_fee:.2f}, penalty=0.08")
+        
+        # ZERO PnL PREVENTION: If fees would exceed position value, abort trade
+        if trading_fee > trade_value * 0.5:  # Fees can't be more than 50% of trade value
+            logging.error(f"EXCESSIVE_FEE_PREVENTED: Fee ${trading_fee:.2f} > 50% of trade value ${trade_value:.2f}")
+            return  # Abort trade
         
         # Update balance with realized PnL and fees
         self.balance += realized_pnl - trading_fee
@@ -1181,6 +1433,11 @@ class FuturesTradingEnv(gym.Env):
         old_position_size = self.position_size
         self.position_size = target_position_size
         
+        # POSITION STATE VALIDATION: Ensure consistency after position update
+        # Only validate if there was a meaningful change to avoid excessive corrections
+        if abs(old_position_size - self.position_size) > 0.0001:
+            self._validate_and_fix_position_state()
+        
         if abs(self.position_size) > 0.001:
             # We have a position
             self.position_side = 1 if self.position_size > 0 else -1
@@ -1188,12 +1445,19 @@ class FuturesTradingEnv(gym.Env):
             # Update entry price for new or flipped positions
             if old_position_size == 0 or np.sign(old_position_size) != np.sign(self.position_size):
                 # New position or position flip
+                # SAFETY CHECK: Ensure entry price is valid
+                if current_price <= 0:
+                    logging.error(f"INVALID_ENTRY_PRICE: Cannot set entry_price to {current_price}, using fallback")
+                    current_price = self._safe_get_price_data(self.current_step, 'close', 50000.0)
+                
                 self.entry_price = current_price
                 self.trade_id += 1
                 self.trade_start_step = self.current_step
                 self.entry_equity = self.equity
                 # Reset reward accumulation for new trade
                 self.current_trade_reward = 0.0
+                
+                logging.debug(f"NEW_POSITION: entry_price=${self.entry_price:.2f}, size={self.position_size:.6f}, step={self.current_step}")
             
             # Update margin and risk management
             self.margin_used = abs(self.position_size * current_price) / self.leverage if self.leverage > 0 else 0
@@ -1216,7 +1480,13 @@ class FuturesTradingEnv(gym.Env):
             elif abs(self.position_size) < 0.001:
                 action_type = "CLOSE_LONG" if old_position_size > 0 else "CLOSE_SHORT" 
             elif old_position_size != 0 and np.sign(old_position_size) != np.sign(self.position_size):
-                action_type = "FLIP_LONG_TO_SHORT" if old_position_size > 0 else "FLIP_SHORT_TO_LONG"
+                # VALIDATION: Only log FLIP if there was actually a position to flip
+                if abs(old_position_size) > 0.001:
+                    action_type = "FLIP_LONG_TO_SHORT" if old_position_size > 0 else "FLIP_SHORT_TO_LONG"
+                else:
+                    # No position to flip, treat as new position
+                    action_type = "OPEN_LONG" if self.position_size > 0 else "OPEN_SHORT"
+                    print(f"WARNING: Step {self.current_step}: Cannot flip position {old_position_size}, treating as OPEN")
             else:
                 action_type = "ADJUST_LONG" if self.position_size > 0 else "ADJUST_SHORT"
             
@@ -1237,7 +1507,7 @@ class FuturesTradingEnv(gym.Env):
                 'side': 'LONG' if self.position_size > 0 else 'SHORT' if self.position_size < 0 else 'FLAT',
                 'entry_action': action_type,
                 'entry_price': log_entry_price,
-                'close_price': '',  # Will be filled when trade closes
+                'close_price': current_price if action_type in ["CLOSE", "CLOSE_LONG", "CLOSE_SHORT"] else '',  # Set price for closed trades
                 'net_pnl': realized_pnl,
                 'close_reward': 0,  # Will be filled when trade closes
                 'entry_net_worth': self.equity,
@@ -1370,6 +1640,120 @@ class FuturesTradingEnv(gym.Env):
         except Exception as e:
             return {'mode': 'dynamic', 'error': str(e)}
     
+    def _validate_and_fix_position_state(self):
+        """
+        POSITION STATE VALIDATION (Fix #3): Validate and fix position state consistency.
+        
+        Ensures:
+        1. Position side matches position size sign
+        2. Entry price is valid when position is open
+        3. Position variables are consistent
+        4. Edge cases are handled gracefully
+        
+        CRITICAL: Now tracks corrections and applies penalties to discourage invalid states
+        """
+        # Initialize position state penalty tracking
+        if not hasattr(self, 'position_state_penalty'):
+            self.position_state_penalty = 0.0
+        
+        position_state_penalty = 0.0
+        corrections_made = 0
+        
+        # Fix position side based on position size
+        if abs(self.position_size) < 0.001:
+            # No meaningful position
+            if self.position_side != 0:
+                # Silent penalty - only log at debug level since penalty is applied
+                logging.debug(f"POSITION_STATE_FIX: Correcting position_side from {self.position_side} to 0 (no position)")
+                position_state_penalty += 0.02  # Small penalty for incorrect position side
+                corrections_made += 1
+                self.position_side = 0
+            
+            # Reset position-related variables for closed positions
+            # BUT ONLY if position_size is actually zero (not just small)
+            if abs(self.position_size) < 0.0001:  # Stricter threshold for complete closure
+                if self.entry_price != 0.0 or self.margin_used != 0.0:
+                    episode_logger.info("POSITION_STATE_FIX: Resetting position variables for truly closed position")
+                    self.entry_price = 0.0
+                    self.margin_used = 0.0
+                    self.unrealized_pnl = 0.0
+                    self.stop_loss_price = None
+                    self.take_profit_price = None
+                    self.liquidation_price = None
+            else:
+                # Small but non-zero position - ensure it has valid entry price
+                if self.entry_price <= 0:
+                    current_price = self._safe_get_price_data(self.current_step, 'close', 50000.0)
+                    # Silent penalty - only log at debug level since penalty is applied
+                    logging.debug(f"POSITION_STATE_FIX: Small position {self.position_size:.6f} missing entry price, using {current_price}")
+                    position_state_penalty += 0.05  # Larger penalty for invalid entry price
+                    corrections_made += 1
+                    self.entry_price = current_price
+                    if not self.trade_start_step:
+                        self.trade_start_step = self.current_step
+        else:
+            # We have a meaningful position
+            expected_side = 1 if self.position_size > 0 else -1
+            
+            if self.position_side != expected_side:
+                # Silent penalty - only log at debug level since penalty is applied
+                logging.debug(f"POSITION_STATE_FIX: Correcting position_side from {self.position_side} to {expected_side}")
+                position_state_penalty += 0.03  # Penalty for wrong position side
+                corrections_made += 1
+                self.position_side = expected_side
+            
+            # Validate entry price for open positions
+            if self.entry_price <= 0:
+                # Try to get current price as fallback
+                current_price = self._safe_get_price_data(self.current_step, 'close', 50000.0)
+                # Silent penalty - only log at debug level since penalty is applied
+                logging.debug(f"POSITION_STATE_FIX: Invalid entry_price {self.entry_price}, using fallback {current_price}")
+                position_state_penalty += 0.1  # Heavy penalty for invalid entry price on active position
+                corrections_made += 1
+                self.entry_price = current_price
+                # Also set trade start step if missing
+                if not self.trade_start_step:
+                    self.trade_start_step = self.current_step
+                    episode_logger.info(f"POSITION_STATE_FIX: Set missing trade_start_step to {self.current_step}")
+        
+        # Validate numeric consistency
+        if np.isnan(self.position_size):
+            penalty_logger.error(f"POSITION_STATE_FIX: NaN position_size detected, resetting to 0 at step {getattr(self, 'current_step', 'unknown')}")
+            logging.debug("POSITION_STATE_FIX: NaN position_size detected, resetting to 0")
+            position_state_penalty += 0.2  # Very heavy penalty for NaN states
+            corrections_made += 1
+            self.position_size = 0.0
+            self.position_side = 0
+        
+        if np.isnan(self.entry_price):
+            current_price = self._safe_get_price_data(self.current_step, 'close', 50000.0)
+            penalty_logger.error(f"POSITION_STATE_FIX: NaN entry_price detected, using {current_price} at step {getattr(self, 'current_step', 'unknown')}")
+            logging.debug(f"POSITION_STATE_FIX: NaN entry_price detected, using {current_price}")
+            position_state_penalty += 0.15  # Heavy penalty for NaN entry price
+            corrections_made += 1
+            self.entry_price = current_price if abs(self.position_size) > 0.001 else 0.0
+        
+        # Apply escalating penalties for multiple corrections in same step
+        if corrections_made > 1:
+            chaos_multiplier = 1 + corrections_made * 0.5
+            position_state_penalty *= chaos_multiplier  # Multiply penalty for chaos
+            # Log chaos to separate file - keeps terminal clean
+            penalty_logger.error(f"POSITION_STATE_CHAOS_PENALTY: {corrections_made} corrections needed, penalty x{chaos_multiplier:.1f} at step {getattr(self, 'current_step', 'unknown')}")
+            # Optional: Also log to debug for development
+            logging.debug(f"POSITION_STATE_CHAOS_PENALTY: {corrections_made} corrections needed, penalty x{chaos_multiplier:.1f}")
+        
+        # Store the penalty for reward calculation
+        self.position_state_penalty = position_state_penalty
+        
+        if position_state_penalty > 0:
+            # Silent penalty - only log at debug level since penalty is applied
+            logging.debug(f"POSITION_STATE_PENALTY: -{position_state_penalty:.4f} for {corrections_made} state corrections")
+        
+        # Log state after validation (for debugging) - reduced frequency
+        if hasattr(self, 'current_step') and self.current_step % 500 == 0:  # Reduced from 100 to 500
+            logging.debug(f"POSITION_STATE: size={self.position_size:.6f}, side={self.position_side}, "
+                         f"entry=${self.entry_price:.2f}, margin=${self.margin_used:.2f}")
+    
     def _open_or_adjust_position(self, target_position_size: float, current_price: float):
         """
         DEPRECATED: This method is kept for compatibility but is inefficient.
@@ -1390,7 +1774,7 @@ class FuturesTradingEnv(gym.Env):
             logging.error(f"ZERO_PRICE_DETECTED in _close_position: current_price={current_price} at step {self.current_step}")
             # Get a valid price from the last available data
             current_price = self._safe_get_price_data(self.current_step, 'close')
-            logging.info(f"PRICE_CORRECTED in _close_position: Using price={current_price} instead")
+            episode_logger.info(f"PRICE_CORRECTED in _close_position: Using price={current_price} instead")
         
         # Validate closing price against market data
         market_price = self._safe_get_price_data(self.current_step, 'close')
@@ -1413,9 +1797,38 @@ class FuturesTradingEnv(gym.Env):
         else:  # Short
             pnl = self.position_size * (self.entry_price - current_price)
         
-        # Calculate fees
+        # ZERO PnL PREVENTION: Validate PnL calculation in position close
+        if abs(pnl) < 0.001 and abs(current_price - self.entry_price) > 0.001:
+            logging.debug(f"ZERO_PNL_CLOSE_DETECTED: PnL={pnl:.6f} despite price movement from {self.entry_price} to {current_price}")
+            # Apply penalty for zero PnL close detection
+            if not hasattr(self, 'zero_pnl_close_penalty'):
+                self.zero_pnl_close_penalty = 0.0
+            self.zero_pnl_close_penalty += 0.025  # Penalty for zero PnL close anomaly
+            penalty_logger.error(f"ZERO_PNL_CLOSE_PENALTY: PnL={pnl:.6f}, price_move={abs(current_price - self.entry_price):.6f}, penalty=0.025")
+            # Continue with close but flag for investigation
+        
+        # Additional validation: prevent closing with invalid entry price
+        if self.entry_price <= 0:
+            logging.debug(f"INVALID_ENTRY_PRICE_CLOSE: entry_price={self.entry_price}, using current_price as fallback")
+            # Apply penalty for invalid entry price
+            if not hasattr(self, 'invalid_entry_penalty'):
+                self.invalid_entry_penalty = 0.0
+            self.invalid_entry_penalty += 0.03  # Penalty for invalid entry price
+            penalty_logger.error(f"INVALID_ENTRY_PRICE_PENALTY: entry_price={self.entry_price}, penalty=0.03")
+            self.entry_price = current_price
+            pnl = 0.0  # No PnL if entry price was invalid
+        
+        # Calculate fees with safety cap
         trade_value = abs(self.position_size * current_price)
-        exit_fee = trade_value * self.taker_fee
+        base_exit_fee = trade_value * self.taker_fee
+        
+        # EMERGENCY FEE CAP: Prevent unrealistic fees (same as main trading logic)
+        max_reasonable_fee = trade_value * 0.01  # 1% maximum fee rate
+        exit_fee = min(base_exit_fee, max_reasonable_fee)
+        
+        # Log when fee cap is applied for debugging
+        if exit_fee < base_exit_fee:
+            print(f"WARNING: Step {self.current_step}: Exit fee capped from ${base_exit_fee:.2f} to ${exit_fee:.2f} on trade value ${trade_value:.2f}")
         
         # Update balance
         self.balance += pnl - exit_fee
@@ -1444,9 +1857,19 @@ class FuturesTradingEnv(gym.Env):
                 self.balance -= funding_cost
                 self.total_funding_costs += funding_cost
         
-        # Log trade (only if not already logged by efficient trading system)
+        # CRITICAL FIX: Prevent duplicate trade logging
+        # Only log if this is a real position close (not already logged by efficient system)
         if self.logger and not getattr(self, '_efficient_trade_logged', False):
-            self._log_trade(current_price, pnl, reason)
+            # Additional validation: only log if we actually had a meaningful position
+            if abs(self.position_size) > 0.001 and self.trade_start_step:
+                self._log_trade(current_price, pnl, reason)
+            else:
+                logging.debug(f"PHANTOM_TRADE_PREVENTED: Skipping log for position_size={self.position_size:.6f}, trade_start_step={self.trade_start_step}")
+                # Apply penalty for phantom trade attempts
+                if not hasattr(self, 'phantom_trade_penalty'):
+                    self.phantom_trade_penalty = 0.0
+                self.phantom_trade_penalty += 0.02  # Penalty for phantom trades
+                penalty_logger.error(f"PHANTOM_TRADE_PENALTY: position_size={self.position_size:.6f}, penalty=0.02")
         
         # Reset the efficient trade logging flag
         self._efficient_trade_logged = False
@@ -1462,6 +1885,9 @@ class FuturesTradingEnv(gym.Env):
         self.take_profit_price = None
         self.liquidation_price = None
         
+        # POSITION STATE VALIDATION: Ensure position is properly closed
+        self._validate_and_fix_position_state()
+        
         # Reset trade reward accumulation
         self.current_trade_reward = 0.0
         
@@ -1469,10 +1895,89 @@ class FuturesTradingEnv(gym.Env):
         # Note: episode_trades is now counted in _execute_efficient_trade
         self.episode_profit += pnl
     
+    def _force_close_position_no_fees(self, current_price: float, reason: str):
+        """
+        Force close position at episode end without charging fees.
+        This prevents fee accumulation during episode cleanup.
+        """
+        if self.position_size == 0:
+            return
+        
+        # Validate price
+        if current_price <= 0:
+            current_price = self._safe_get_price_data(self.current_step, 'close')
+        
+        # Calculate PnL without fees
+        if self.position_side == 1:  # Long
+            pnl = self.position_size * (current_price - self.entry_price)
+        else:  # Short
+            pnl = self.position_size * (self.entry_price - current_price)
+        
+        # Update balance with PnL only (NO FEES for episode cleanup)
+        self.balance += pnl
+        self.total_realized_pnl += pnl
+        self.last_trade_pnl = pnl
+        
+        # Log the forced close (minimal logging for episode cleanup)
+        if self.logger:
+            trade_data = {
+                'trade_id': f"EPISODE_END_{self.trade_id:05d}",
+                'training_step': self.current_step,
+                'training_iteration': getattr(self, 'training_iteration', 0),
+                'entry_datetime': self._safe_get_price_data(self.trade_start_step or self.current_step, 'timestamp', 0),
+                'close_datetime': self._safe_get_price_data(self.current_step, 'timestamp', 0),
+                'side': 'LONG' if self.position_side == 1 else 'SHORT',
+                'entry_action': 'EPISODE_CLEANUP',
+                'entry_price': self.entry_price,
+                'close_price': current_price,
+                'net_pnl': pnl,
+                'close_reward': 0.0,
+                'entry_net_worth': self.equity,
+                'close_net_worth': self.equity,
+                'trade_duration_hours': 0,
+                'status': 'FORCE_CLOSED',
+                'win_loss': 'CLEANUP',
+                'position_size': abs(self.position_size),
+                'fees_paid': 0.0,  # NO FEES for episode cleanup
+                'stop_loss_price': '',
+                'take_profit_price': '',
+                'close_reason': reason
+            }
+            self.logger.log_trade(trade_data)
+        
+        # Reset position completely
+        self.position_size = 0.0
+        self.position_side = 0
+        self.entry_price = 0.0
+        self.margin_used = 0.0
+        self.unrealized_pnl = 0.0
+        self.leverage = 0.0
+        self.stop_loss_price = None
+        self.take_profit_price = None
+        self.liquidation_price = None
+        self.current_trade_reward = 0.0
+        
+        # Update episode stats
+        self.episode_profit += pnl
+        
+        logging.info(f"FORCE_CLOSED position at episode end: PnL={pnl:.2f}, NO FEES CHARGED")
+    
     def _log_trade(self, exit_price: float, pnl: float, reason: str):
         """Log completed trade"""
         if not self.trade_start_step:
             return
+        
+        # PRICE VALIDATION: Ensure exit_price is valid
+        if np.isnan(exit_price) or exit_price <= 0:
+            # Use current market price as fallback
+            current_price = self._safe_get_price_data(self.current_step, 'close', 0)
+            if np.isnan(current_price) or current_price <= 0:
+                # Last resort: use entry price
+                exit_price = getattr(self, 'entry_price', 40000.0)
+                print(f"WARNING: Step {self.current_step}: Invalid exit price, using entry price {exit_price}")
+            else:
+                exit_price = current_price
+                print(f"WARNING: Step {self.current_step}: Invalid exit price, using current price {exit_price}")
         
         duration_steps = self.current_step - self.trade_start_step
         duration_hours = duration_steps * 0.25  # 15min intervals
@@ -1486,7 +1991,12 @@ class FuturesTradingEnv(gym.Env):
         if logged_entry_price <= 0.0 and self.trade_start_step:
             # Fall back to using price data from trade start step
             logged_entry_price = self._safe_get_price_data(self.trade_start_step, 'close')
-            logging.warning(f"ENTRY_PRICE_FALLBACK: Using price from trade start step {self.trade_start_step}: {logged_entry_price}")
+            logging.debug(f"ENTRY_PRICE_FALLBACK: Using price from trade start step {self.trade_start_step}: {logged_entry_price}")
+            # Apply penalty for entry price fallback
+            if not hasattr(self, 'entry_price_fallback_penalty'):
+                self.entry_price_fallback_penalty = 0.0
+            self.entry_price_fallback_penalty += 0.01  # Small penalty for entry price fallback
+            penalty_logger.error(f"ENTRY_PRICE_FALLBACK_PENALTY: fallback_price={logged_entry_price}, penalty=0.01")
         
         # Determine clear action label based on what actually happened
         if reason in ["CANCEL_ACTION", "LIQUIDATION", "STOP_LOSS", "TAKE_PROFIT"]:
@@ -1971,6 +2481,31 @@ class FuturesTradingEnv(gym.Env):
         # Apply dynamic loss multiplier
         total_penalty *= self.loss_penalty_multiplier
         
+        # Add safety intervention penalties (teach agent not to attempt extreme actions)
+        safety_penalty = getattr(self, 'safety_intervention_penalty', 0.0)
+        extreme_leverage_penalty = getattr(self, 'extreme_leverage_penalty', 0.0)
+        position_state_penalty = getattr(self, 'position_state_penalty', 0.0)
+        zero_pnl_penalty = getattr(self, 'zero_pnl_prevention_penalty', 0.0)
+        dust_position_penalty = getattr(self, 'dust_position_penalty', 0.0)
+        
+        # Add new penalty categories for cleaner trading
+        phantom_trade_penalty = getattr(self, 'phantom_trade_penalty', 0.0)
+        invalid_entry_penalty = getattr(self, 'invalid_entry_penalty', 0.0)
+        zero_pnl_detection_penalty = getattr(self, 'zero_pnl_detection_penalty', 0.0)
+        zero_pnl_close_penalty = getattr(self, 'zero_pnl_close_penalty', 0.0)
+        excessive_modification_penalty = getattr(self, 'excessive_modification_penalty', 0.0)
+        fee_cap_penalty = getattr(self, 'fee_cap_penalty', 0.0)
+        entry_price_fallback_penalty = getattr(self, 'entry_price_fallback_penalty', 0.0)
+        
+        # Combine all penalty categories
+        all_penalty_categories = (
+            safety_penalty + extreme_leverage_penalty + position_state_penalty + zero_pnl_penalty + 
+            dust_position_penalty + phantom_trade_penalty + invalid_entry_penalty + 
+            zero_pnl_detection_penalty + zero_pnl_close_penalty + excessive_modification_penalty + 
+            fee_cap_penalty + entry_price_fallback_penalty
+        )
+        total_penalty += all_penalty_categories
+        
         # Final reward calculation
         final_reward = base_reward + positive_bonus - total_penalty
         
@@ -2094,7 +2629,11 @@ class FuturesTradingEnv(gym.Env):
             'max_equity': self.max_equity,
             'drawdown': (self.max_equity - self.equity) / self.max_equity if self.max_equity > 0 else 0,
             'total_fees': self.total_fees,
-            'last_trade_pnl': self.last_trade_pnl
+            'last_trade_pnl': self.last_trade_pnl,
+            
+            # Safety intervention tracking
+            'safety_intervention_penalty': getattr(self, 'safety_intervention_penalty', 0.0),
+            'extreme_leverage_penalty': getattr(self, 'extreme_leverage_penalty', 0.0)
         }
     
     def render(self, mode='human'):
