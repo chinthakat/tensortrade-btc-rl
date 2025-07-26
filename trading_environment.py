@@ -17,6 +17,9 @@ import os
 from collections import deque
 import warnings
 
+# Import realistic execution engine
+from market_execution_engine import get_execution_engine, get_execution_logger, calculate_realistic_execution_price
+
 # Required dependencies - fail fast if not available
 try:
     from sklearn.preprocessing import StandardScaler
@@ -298,7 +301,7 @@ class FuturesTradingEnv(gym.Env):
         maker_fee: float = 0.0002,  # 0.02%
         taker_fee: float = 0.0004,  # 0.04%
         funding_rate: float = 0.0001,  # 0.01% per 8 hours
-        window_size: int = 60,  # IMPROVED: Increased from 20 to 60 to align with indicator buffer requirements
+        window_size: int = 20,  # RESTORED: Back to 20 for compatibility with existing models (was 60)
         stop_loss_pct: float = 0.02,  # 2% - fallback for fixed mode
         take_profit_pct: float = 0.04,  # 4% - fallback for fixed mode
         # Dynamic Stop-Loss and Take-Profit Configuration
@@ -320,6 +323,9 @@ class FuturesTradingEnv(gym.Env):
         liquidation_fee_rate: float = 0.005,  # 0.5% liquidation fee
         # Enhanced action space control
         use_advanced_action_space: bool = False,  # Toggle between simple and advanced action space
+        # Realistic Execution Control (FIX 1)
+        use_realistic_execution: bool = False,  # Control whether to use realistic execution with slippage
+        price_validation_tolerance: float = 0.001,  # Price validation tolerance (0.1%)
         # Configurable Reward Function Parameters
         reward_config: Optional[Dict[str, float]] = None
     ):
@@ -356,6 +362,10 @@ class FuturesTradingEnv(gym.Env):
         
         # Enhanced action space control
         self.use_advanced_action_space = use_advanced_action_space
+        
+        # Realistic execution control (FIX 1)
+        self.use_realistic_execution = use_realistic_execution
+        self.price_validation_tolerance = price_validation_tolerance
         
         # Configure reward function parameters
         self._setup_reward_config(reward_config)
@@ -420,7 +430,7 @@ class FuturesTradingEnv(gym.Env):
             'portfolio_features': spaces.Box(
                 low=-np.inf, 
                 high=np.inf, 
-                shape=(9,),  # Enhanced to 9 features (added PnL trend)
+                shape=(13,),  # Enhanced to 13 features (added position context)
                 dtype=np.float32
             )
         })
@@ -458,6 +468,27 @@ class FuturesTradingEnv(gym.Env):
         df['log_returns'] = np.log(df['close'] / df['close'].shift(1))
         df['high_low_pct'] = (df['high'] - df['low']) / df['close']
         df['close_open_pct'] = (df['close'] - df['open']) / df['open']
+        
+        # === ENHANCED MARKET MICROSTRUCTURE FEATURES ===
+        # Price momentum features for better trend detection
+        df['price_momentum_3'] = df['close'].pct_change(3)  # 3-period momentum
+        df['price_momentum_5'] = df['close'].pct_change(5)  # 5-period momentum
+        df['price_acceleration'] = df['returns'].diff()     # Rate of change of returns
+        
+        # Volume-price divergence (reveals accumulation/distribution)
+        df['volume_price_corr'] = df['close'].rolling(10).corr(df['volume'])
+        df['obv'] = (np.sign(df['close'].diff()) * df['volume']).cumsum()  # On-Balance Volume
+        df['obv_norm'] = df['obv'] / df['obv'].rolling(20).std()  # Normalized OBV
+        
+        # Microstructure patterns
+        df['high_low_spread'] = (df['high'] - df['low']) / df['close']  # Intraday volatility
+        df['close_position_in_range'] = (df['close'] - df['low']) / (df['high'] - df['low'])  # Where price closed in range
+        
+        # Support/Resistance levels (key for holding decisions)
+        df['resistance_distance'] = (df['close'].rolling(20).max() - df['close']) / df['close']
+        df['support_distance'] = (df['close'] - df['close'].rolling(20).min()) / df['close']
+        
+        # Note: Market regime indicator (trend_strength) will be calculated after ADX is computed
         
         # Check if we have enough data for technical indicators
         min_data_required = 30  # Minimum data points needed for most indicators
@@ -514,6 +545,16 @@ class FuturesTradingEnv(gym.Env):
             # Directional bias: +1 for bullish, -1 for bearish, 0 for neutral
             df['directional_bias'] = np.where(df['di_plus'] > df['di_minus'], 1, 
                                             np.where(df['di_minus'] > df['di_plus'], -1, 0))
+            
+            # Market regime indicator (trend_strength) - now that ADX exists
+            df['trend_strength'] = df['adx'] * np.sign(df['close'] - df['close'].rolling(20).mean())
+        else:
+            # Set default values if ADX calculation failed
+            df['adx'] = 0
+            df['di_plus'] = 0
+            df['di_minus'] = 0
+            df['directional_bias'] = 0
+            df['trend_strength'] = 0
         
         # 2. Parabolic SAR - Trend Direction and Stop Loss
         psar_result = ta.psar(df['high'], df['low'], df['close'])
@@ -589,10 +630,23 @@ class FuturesTradingEnv(gym.Env):
                 df[col] = df[col].fillna(method='ffill').fillna(method='bfill')
         
         # For percentage-based features, fill with 0
-        pct_features = ['returns', 'log_returns', 'high_low_pct', 'close_open_pct', 'price_position']
+        pct_features = ['returns', 'log_returns', 'high_low_pct', 'close_open_pct', 'price_position',
+                       'price_momentum_3', 'price_momentum_5', 'price_acceleration', 
+                       'resistance_distance', 'support_distance']
         for col in pct_features:
             if col in df.columns:
                 df[col] = df[col].fillna(0)
+        
+        # For volume-based features
+        volume_features = ['volume_price_corr', 'obv_norm', 'close_position_in_range']
+        for col in volume_features:
+            if col in df.columns:
+                if col == 'volume_price_corr':
+                    df[col] = df[col].fillna(0)  # No correlation
+                elif col == 'close_position_in_range':
+                    df[col] = df[col].fillna(0.5)  # Middle of range
+                elif col == 'obv_norm':
+                    df[col] = df[col].fillna(0)  # Neutral OBV
         
         # For technical indicators, use more sophisticated filling
         if 'rsi' in df.columns:
@@ -625,7 +679,8 @@ class FuturesTradingEnv(gym.Env):
             'ma_cross_signal': 0,  # No cross
             'macd_cross_signal': 0,  # No cross
             'trend_5': 0, 'trend_10': 0, 'trend_20': 0,  # Neutral trends
-            'composite_direction': 0  # Neutral composite
+            'composite_direction': 0,  # Neutral composite
+            'trend_strength': 0  # Neutral trend strength
         }
         
         for col, fill_value in directional_cols.items():
@@ -650,11 +705,13 @@ class FuturesTradingEnv(gym.Env):
         else:
             logging.info("SUCCESS: Data alignment preserved - no rows lost during preprocessing")
         
-        # Select feature columns (SIMPLIFIED 8-CORE MINIMAL SET)
-        # This reduces features from 27 to 8 (70% reduction) to solve overtrading
+        # Select feature columns (ENHANCED SET WITH MICROSTRUCTURE)
+        # Expanded from 8 to 16 features for better pattern recognition
         feature_cols = [
             # Core price momentum (most important)
             'returns',          # Price percentage change
+            'price_momentum_3', # 3-period momentum for short-term trends
+            'price_momentum_5', # 5-period momentum for medium-term trends
             
             # Essential momentum indicators  
             'rsi',             # 14-period RSI (overbought/oversold)
@@ -666,19 +723,29 @@ class FuturesTradingEnv(gym.Env):
             # Essential momentum oscillator
             'macd',            # MACD line (momentum)
             
-            # Essential trend strength
-            'adx',             # Average Directional Index (trend strength)
+            # Essential trend strength with direction
+            'trend_strength',  # Signed ADX (trend strength + direction)
             
             # Essential volatility
             'atr',             # Average True Range (volatility measure)
             
-            # Essential volume context
-            'volume_ratio'     # Volume relative to average
+            # Market microstructure features
+            'volume_price_corr',        # Volume-price correlation
+            'close_position_in_range',  # Where price closed in daily range
+            'resistance_distance',      # Distance to resistance levels
+            'support_distance',         # Distance to support levels
+            
+            # Enhanced volume context
+            'volume_ratio',     # Volume relative to average
+            'obv_norm',        # Normalized On-Balance Volume
+            
+            # Market regime
+            'price_acceleration' # Rate of change acceleration
         ]
         
-        logging.info("TARGET: USING SIMPLIFIED 8-CORE INDICATOR SET")
-        logging.info("REDUCED: Reduced from 27 to 8 indicators (70% reduction)")
-        logging.info("BOOST: This should eliminate overtrading behavior")
+        logging.info("ENHANCED: Using 16-feature microstructure set for better pattern recognition")
+        logging.info("IMPROVED: Added momentum, support/resistance, and volume analysis")
+        logging.info("TARGET: Better trend following and position holding decisions")
         
         # Check which feature columns are available
         available_cols = [col for col in feature_cols if col in df.columns]
@@ -795,6 +862,10 @@ class FuturesTradingEnv(gym.Env):
         
         # Action type statistics
         self.action_type_counts = {"HOLD": 0, "BUY": 0, "SELL": 0, "CANCEL": 0}
+        
+        # Enhanced tracking for new reward features
+        self.last_trade_step = 0  # For inactivity penalty tracking
+        self.unrealized_pnl_history = []  # For PnL trend analysis
         
         # Reset duplicate logging prevention flag
         self._efficient_trade_logged = False
@@ -942,7 +1013,7 @@ class FuturesTradingEnv(gym.Env):
             # Create terminal observation
             observation = {
                 'market_features': np.zeros((self.window_size, len(self.feature_columns.columns)), dtype=np.float32),
-                'portfolio_features': np.zeros(9, dtype=np.float32)
+                'portfolio_features': np.zeros(13, dtype=np.float32)
             }
             
             # Final reward calculation
@@ -952,8 +1023,7 @@ class FuturesTradingEnv(gym.Env):
             logging.info(f"EPISODE_TERMINATED at step {self.current_step}: No more trading allowed at episode boundary")
             return observation, reward, terminated, truncated, info
         
-        # Safe to continue - move to next step for trading
-        self.current_step = next_step
+        # FIX 2: Execute trades at current step BEFORE incrementing - Fixes timing issues
         current_price = self._safe_get_price_data(self.current_step, 'close')
         current_high = self._safe_get_price_data(self.current_step, 'high', current_price)
         current_low = self._safe_get_price_data(self.current_step, 'low', current_price)
@@ -1059,6 +1129,9 @@ class FuturesTradingEnv(gym.Env):
                 # Execute BUY/SELL action
                 self._execute_action(leverage, risk_percentage, current_price)
         
+        # FIX 2: Now move to next step AFTER trade execution for correct timing
+        self.current_step = next_step
+        
         # Update tracking
         self.equity_history.append(self.equity)
         self.balance_history.append(self.balance)
@@ -1114,7 +1187,7 @@ class FuturesTradingEnv(gym.Env):
             # Return a dummy observation for terminal states
             observation = {
                 'market_features': np.zeros((self.window_size, len(self.feature_columns.columns)), dtype=np.float32),
-                'portfolio_features': np.zeros(9, dtype=np.float32)  # Updated to 9 features
+                'portfolio_features': np.zeros(13, dtype=np.float32)  # Updated to 13 features
             }
         
         info = self._get_info()
@@ -1156,9 +1229,17 @@ class FuturesTradingEnv(gym.Env):
             current_price = self._safe_get_price_data(self.current_step, 'close')
             episode_logger.info(f"PRICE_CORRECTED: Using price={current_price} instead")
         
-        # Validate current price against market data
+        # Validate current price against market data (FIX 3: Enhanced price validation)
         market_price = self._safe_get_price_data(self.current_step, 'close')
         timestamp = self._safe_get_price_data(self.current_step, 'timestamp', 0)
+        
+        # Enhanced price validation with configurable tolerance
+        price_difference = abs(current_price - market_price) / market_price if market_price > 0 else 0
+        if price_difference > self.price_validation_tolerance:
+            logging.error(f"PRICE_VALIDATION_FAILED: Trade price {current_price:.4f} differs from market price {market_price:.4f} by {price_difference:.4%} (tolerance: {self.price_validation_tolerance:.1%})")
+            # Correct the price to prevent anomalies
+            current_price = market_price
+            logging.info(f"PRICE_CORRECTED: Using market price {current_price:.4f} instead")
         
         is_valid, validation_details = self.price_validator.validate_price(
             trade_price=current_price,
@@ -1380,10 +1461,34 @@ class FuturesTradingEnv(gym.Env):
             # We're modifying an existing position
             if np.sign(target_position_size) != np.sign(self.position_size):
                 # Position flip: calculate PnL on the closed portion - FIXED: Use abs(position_size) for correct short calculations
+                
+                # 🚨 REALISTIC EXECUTION: Calculate realistic close price for PnL calculation (only if enabled)
+                market_close = current_price
+                
+                if self.use_realistic_execution:
+                    market_high = self._safe_get_price_data(self.current_step, 'high', current_price)
+                    market_low = self._safe_get_price_data(self.current_step, 'low', current_price)
+                    
+                    # Determine trade side for closing (opposite of current position)
+                    close_trade_side = 'SELL' if self.position_size > 0 else 'BUY'
+                    position_value = abs(self.position_size * current_price)
+                    
+                    # Get realistic execution price for PnL calculation
+                    realistic_close_price_pnl = calculate_realistic_execution_price(
+                        market_price=market_close,
+                        high_price=market_high,
+                        low_price=market_low,
+                        side=close_trade_side,
+                        position_value=position_value
+                    )
+                else:
+                    # Use market price directly for backtesting accuracy
+                    realistic_close_price_pnl = market_close
+                
                 if self.position_side == 1:  # Closing long
-                    realized_pnl = abs(self.position_size) * (current_price - self.entry_price)
+                    realized_pnl = abs(self.position_size) * (realistic_close_price_pnl - self.entry_price)
                 else:  # Closing short
-                    realized_pnl = abs(self.position_size) * (self.entry_price - current_price)
+                    realized_pnl = abs(self.position_size) * (self.entry_price - realistic_close_price_pnl)
                 
                 # ZERO PnL PREVENTION: Validate calculated PnL makes sense
                 if abs(realized_pnl) < 0.001 and abs(current_price - self.entry_price) > 0.001:
@@ -1410,10 +1515,34 @@ class FuturesTradingEnv(gym.Env):
             elif abs(self.position_size) > abs(target_position_size):
                 # Partial close: calculate PnL on the reduced portion
                 position_reduction = self.position_size - target_position_size
+                
+                # 🚨 REALISTIC EXECUTION: Calculate realistic close price for partial close PnL (only if enabled)
+                market_close = current_price
+                
+                if self.use_realistic_execution:
+                    market_high = self._safe_get_price_data(self.current_step, 'high', current_price)
+                    market_low = self._safe_get_price_data(self.current_step, 'low', current_price)
+                    
+                    # Determine trade side for partial close (opposite of current position)
+                    close_trade_side = 'SELL' if self.position_size > 0 else 'BUY'
+                    partial_position_value = abs(position_reduction * current_price)
+                    
+                    # Get realistic execution price for partial close
+                    realistic_partial_close_price = calculate_realistic_execution_price(
+                        market_price=market_close,
+                        high_price=market_high,
+                        low_price=market_low,
+                        side=close_trade_side,
+                        position_value=partial_position_value
+                    )
+                else:
+                    # Use market price directly for backtesting accuracy
+                    realistic_partial_close_price = market_close
+                
                 if self.position_side == 1:  # Reducing long
-                    realized_pnl = position_reduction * (current_price - self.entry_price)
+                    realized_pnl = position_reduction * (realistic_partial_close_price - self.entry_price)
                 else:  # Reducing short
-                    realized_pnl = position_reduction * (self.entry_price - current_price)
+                    realized_pnl = position_reduction * (self.entry_price - realistic_partial_close_price)
                 
                 self.total_realized_pnl += realized_pnl
                 self.last_trade_pnl = realized_pnl
@@ -1476,7 +1605,50 @@ class FuturesTradingEnv(gym.Env):
                     logging.error(f"INVALID_ENTRY_PRICE: Cannot set entry_price to {current_price}, using fallback")
                     current_price = self._safe_get_price_data(self.current_step, 'close', 50000.0)
                 
-                self.entry_price = current_price
+                # 🚨 REALISTIC EXECUTION: Calculate actual execution price with spreads/slippage (only if enabled)
+                market_close = current_price
+                
+                if self.use_realistic_execution:
+                    market_high = self._safe_get_price_data(self.current_step, 'high', current_price)
+                    market_low = self._safe_get_price_data(self.current_step, 'low', current_price)
+                    
+                    # Determine trade side based on position change
+                    if target_position_size > old_position_size:
+                        trade_side = 'BUY'
+                    else:
+                        trade_side = 'SELL'
+                    
+                    # Calculate position value for market impact
+                    position_value = abs(target_position_size * current_price)
+                    
+                    # Get realistic execution price
+                    realistic_execution_price = calculate_realistic_execution_price(
+                        market_price=market_close,
+                        high_price=market_high,
+                        low_price=market_low,
+                        side=trade_side,
+                        position_value=position_value
+                    )
+                    
+                    # Log execution details for analysis
+                    execution_logger = get_execution_logger()
+                    execution_engine = get_execution_engine()
+                    _, execution_details = execution_engine.get_execution_price(
+                        market_close, market_high, market_low, trade_side, position_value
+                    )
+                    
+                    execution_logger.log_execution(
+                        trade_id=f"EP{self.episode_id:03d}_TRADE_{self.trade_id+1:05d}",
+                        step=self.current_step,
+                        execution_price=realistic_execution_price,
+                        execution_details=execution_details
+                    )
+                    
+                    # Use realistic execution price
+                    self.entry_price = realistic_execution_price
+                else:
+                    # Use market price directly for backtesting accuracy
+                    self.entry_price = current_price
                 # Only increment trade_id for non-FLIP operations (FLIP handles its own ID management)
                 if old_position_size == 0:  # True new position, not a flip
                     self.trade_id += 1
@@ -1515,6 +1687,49 @@ class FuturesTradingEnv(gym.Env):
             elif old_position_size != 0 and np.sign(old_position_size) != np.sign(self.position_size):
                 # CRITICAL FIX: FLIP operations need TWO separate trade logs
                 if abs(old_position_size) > 0.001:
+                    # 🚨 REALISTIC EXECUTION: Calculate realistic close price (only if enabled)
+                    market_close = current_price
+                    
+                    if self.use_realistic_execution:
+                        market_high = self._safe_get_price_data(self.current_step, 'high', current_price)
+                        market_low = self._safe_get_price_data(self.current_step, 'low', current_price)
+                        
+                        # Determine trade side for closing (opposite of position)
+                        close_trade_side = 'SELL' if old_position_size > 0 else 'BUY'
+                        position_value = abs(old_position_size * current_price)
+                        
+                        # Get realistic execution price for closing
+                        realistic_close_price = calculate_realistic_execution_price(
+                            market_price=market_close,
+                            high_price=market_high,
+                            low_price=market_low,
+                            side=close_trade_side,
+                            position_value=position_value
+                        )
+                        
+                        # Log close execution details
+                        execution_logger = get_execution_logger()
+                        execution_engine = get_execution_engine()
+                        _, execution_details = execution_engine.get_execution_price(
+                            market_close, market_high, market_low, close_trade_side, position_value
+                        )
+                        
+                        execution_logger.log_execution(
+                            trade_id=f"EP{self.episode_id:03d}_CLOSE_{self.trade_id:05d}",
+                            step=self.current_step,
+                            execution_price=realistic_close_price,
+                            execution_details=execution_details
+                        )
+                    else:
+                        # Use market price directly for backtesting accuracy
+                        realistic_close_price = market_close
+                    
+                    # Recalculate realized PnL with realistic close price
+                    if old_position_size > 0:  # Closing long
+                        realized_pnl = abs(old_position_size) * (realistic_close_price - self.entry_price)
+                    else:  # Closing short
+                        realized_pnl = abs(old_position_size) * (self.entry_price - realistic_close_price)
+                    
                     # Calculate trade duration for the closing trade
                     close_duration_steps = self.current_step - (self.trade_start_step or self.current_step)
                     close_duration_hours = close_duration_steps * 0.25  # 15min intervals
@@ -1530,7 +1745,7 @@ class FuturesTradingEnv(gym.Env):
                         'side': 'FLAT',
                         'entry_action': close_action_type,
                         'entry_price': round(self.trade_entry_price or self.entry_price, 4),  # FIXED: Use stored trade entry price for consistency
-                        'close_price': round(current_price, 4),
+                        'close_price': round(realistic_close_price, 4),  # 🚨 Use realistic close price
                         'net_pnl': realized_pnl,
                         'close_reward': 0,
                         'entry_net_worth': getattr(self, 'entry_equity', self.equity),  # Use stored entry equity
@@ -1614,8 +1829,37 @@ class FuturesTradingEnv(gym.Env):
                     # Fallback: if trade_start_step is invalid, assume 1 step minimum
                     duration_hours = 0.25  # Minimum 15 minutes
                     logging.debug(f"DURATION_FALLBACK: trade_start_step={self.trade_start_step}, using minimum duration")
+                
+                # 🚨 REALISTIC EXECUTION: Calculate realistic close price for this context
+                market_close = current_price
+                market_high = self._safe_get_price_data(self.current_step, 'high', current_price)
+                market_low = self._safe_get_price_data(self.current_step, 'low', current_price)
+                
+                # Determine trade side for closing (opposite of position)
+                close_trade_side = 'SELL' if self.position_size > 0 else 'BUY'
+                position_value = abs(self.position_size * current_price)
+                
+                # Get realistic execution price for closing
+                realistic_close_price_general = calculate_realistic_execution_price(
+                    market_price=market_close,
+                    high_price=market_high,
+                    low_price=market_low,
+                    side=close_trade_side,
+                    position_value=position_value
+                )
+                
+                # Recalculate realized_pnl for this trade logging context using realistic close price
+                if action_type in ["CLOSE_LONG", "CLOSE_SHORT"]:
+                    if action_type == "CLOSE_LONG":
+                        realized_pnl_general = abs(self.position_size) * (realistic_close_price_general - self.entry_price)
+                    else:  # CLOSE_SHORT
+                        realized_pnl_general = abs(self.position_size) * (self.entry_price - realistic_close_price_general)
+                else:
+                    realized_pnl_general = realized_pnl  # Use the already calculated PnL
             else:
                 duration_hours = 0  # New trades start with 0 duration
+                realistic_close_price_general = current_price  # Not closing, use current price
+                realized_pnl_general = realized_pnl  # Use the already calculated PnL
             
             # Determine the correct entry datetime
             # CRITICAL FIX: Always use the stored trade_entry_datetime for consistency
@@ -1644,8 +1888,8 @@ class FuturesTradingEnv(gym.Env):
                 'side': 'LONG' if final_position_size_for_logging > 0 else 'SHORT' if final_position_size_for_logging < 0 else 'FLAT',
                 'entry_action': action_type,
                 'entry_price': round(log_entry_price, 4),  # Round to 4 decimal places for precision
-                'close_price': round(current_price, 4) if action_type in ["CLOSE_LONG", "CLOSE_SHORT"] else '',  # Round and set price for closed trades
-                'net_pnl': round(realized_pnl, 6) if action_type in ["CLOSE_LONG", "CLOSE_SHORT"] else 0.0,  # Round PnL and only show on trade closure
+                'close_price': round(realistic_close_price_general, 4) if action_type in ["CLOSE_LONG", "CLOSE_SHORT"] else '',  # 🚨 Use realistic close price for closed trades
+                'net_pnl': round(realized_pnl_general, 6) if action_type in ["CLOSE_LONG", "CLOSE_SHORT"] else 0.0,  # Round PnL and only show on trade closure
                 'close_reward': 0,  # Will be filled when trade closes
                 'entry_net_worth': getattr(self, 'entry_equity', self.equity),  # Use stored entry equity
                 'close_net_worth': self.equity,
@@ -1668,12 +1912,49 @@ class FuturesTradingEnv(gym.Env):
                 self._efficient_trade_logged = True
     
     def _update_stop_loss_take_profit(self, current_price: float):
-        """Update stop-loss and take-profit prices with dynamic ATR-based calculation"""
+        """Update stop-loss and take-profit prices with dynamic ATR-based calculation and trailing stops"""
         if abs(self.position_size) < 0.001:
             self.stop_loss_price = None
             self.take_profit_price = None
             return
         
+        # === TRAILING STOP LOGIC FOR PROFITABLE POSITIONS ===
+        if self.unrealized_pnl > 0 and self.entry_price > 0:
+            position_value = abs(self.position_size * self.entry_price)
+            if position_value > 0:
+                profit_pct = self.unrealized_pnl / position_value
+                
+                # Apply trailing stop for positions with >2% profit
+                if profit_pct > 0.02:
+                    trail_buffer = 0.005  # 0.5% buffer above break-even
+                    
+                    if self.position_side == 1:  # Long position
+                        # Trail stop-loss up to break-even + buffer, but never lower it
+                        new_stop = self.entry_price * (1 + trail_buffer)
+                        if self.stop_loss_price is None or new_stop > self.stop_loss_price:
+                            self.stop_loss_price = new_stop
+                    else:  # Short position
+                        # Trail stop-loss down to break-even - buffer, but never raise it
+                        new_stop = self.entry_price * (1 - trail_buffer)
+                        if self.stop_loss_price is None or new_stop < self.stop_loss_price:
+                            self.stop_loss_price = new_stop
+                
+                # For very profitable positions (>5%), use tighter trailing stop
+                elif profit_pct > 0.05:
+                    trail_buffer = 0.01  # 1% buffer for highly profitable trades
+                    
+                    if self.position_side == 1:  # Long position
+                        # More aggressive trailing for high profits
+                        new_stop = current_price * (1 - trail_buffer)
+                        if self.stop_loss_price is None or new_stop > self.stop_loss_price:
+                            self.stop_loss_price = new_stop
+                    else:  # Short position
+                        new_stop = current_price * (1 + trail_buffer)
+                        if self.stop_loss_price is None or new_stop < self.stop_loss_price:
+                            self.stop_loss_price = new_stop
+                    return  # Skip normal stop-loss calculation for highly profitable trades
+
+        # === NORMAL STOP-LOSS CALCULATION ===
         if self.use_dynamic_stops:
             # Get current ATR value for dynamic calculation
             current_atr = self._get_current_atr(current_price)
@@ -1681,20 +1962,43 @@ class FuturesTradingEnv(gym.Env):
             # Calculate dynamic stop-loss and take-profit percentages
             dynamic_stop_pct, dynamic_tp_pct = self._calculate_dynamic_stops(current_atr, current_price)
             
+            # Only update if not already protected by trailing stops
             if self.position_side == 1:  # Long
-                self.stop_loss_price = current_price * (1 - dynamic_stop_pct)
-                self.take_profit_price = current_price * (1 + dynamic_tp_pct)
+                new_stop = current_price * (1 - dynamic_stop_pct)
+                new_tp = current_price * (1 + dynamic_tp_pct)
+                
+                # Don't lower trailing stop-loss
+                if self.stop_loss_price is None or new_stop > self.stop_loss_price:
+                    self.stop_loss_price = new_stop
+                self.take_profit_price = new_tp
+                
             else:  # Short
-                self.stop_loss_price = current_price * (1 + dynamic_stop_pct)
-                self.take_profit_price = current_price * (1 - dynamic_tp_pct)
+                new_stop = current_price * (1 + dynamic_stop_pct)
+                new_tp = current_price * (1 - dynamic_tp_pct)
+                
+                # Don't raise trailing stop-loss for shorts
+                if self.stop_loss_price is None or new_stop < self.stop_loss_price:
+                    self.stop_loss_price = new_stop
+                self.take_profit_price = new_tp
         else:
-            # Fallback to fixed percentages
+            # Fallback to fixed percentages (with trailing stop protection)
             if self.position_side == 1:  # Long
-                self.stop_loss_price = current_price * (1 - self.stop_loss_pct)
-                self.take_profit_price = current_price * (1 + self.take_profit_pct)
+                new_stop = current_price * (1 - self.stop_loss_pct)
+                new_tp = current_price * (1 + self.take_profit_pct)
+                
+                # Don't lower trailing stop-loss
+                if self.stop_loss_price is None or new_stop > self.stop_loss_price:
+                    self.stop_loss_price = new_stop
+                self.take_profit_price = new_tp
+                
             else:  # Short
-                self.stop_loss_price = current_price * (1 + self.stop_loss_pct)
-                self.take_profit_price = current_price * (1 - self.take_profit_pct)
+                new_stop = current_price * (1 + self.stop_loss_pct)
+                new_tp = current_price * (1 - self.take_profit_pct)
+                
+                # Don't raise trailing stop-loss for shorts
+                if self.stop_loss_price is None or new_stop < self.stop_loss_price:
+                    self.stop_loss_price = new_stop
+                self.take_profit_price = new_tp
     
     def _get_current_atr(self, current_price: float) -> float:
         """Get current ATR value from the feature data (before scaling)"""
@@ -2490,6 +2794,184 @@ class FuturesTradingEnv(gym.Env):
                 positive_bonus += min(recent_improvement * self.reward_config['recovery_multiplier'], 
                                     self.reward_config['recovery_bonus_cap'])
         
+        # === NEW REWARD COMPONENTS FOR IMPROVED TRADING BEHAVIOR ===
+        
+        # ISSUE 1: Trend Following Bonus - Reward holding while PnL grows
+        if (abs(self.position_size) > 0.001 and 
+            hasattr(self, 'last_action_type') and self.last_action_type == "HOLD"):
+            
+            # Check if unrealized PnL is improving
+            if (len(self.unrealized_pnl_history) >= 2 and 
+                self.unrealized_pnl > 0 and
+                'trend_following_bonus' in self.reward_config):
+                
+                recent_pnl_change = self.unrealized_pnl_history[-1] - self.unrealized_pnl_history[-2]
+                if recent_pnl_change > self.reward_config.get('trend_following_threshold', 0.01):
+                    positive_bonus += self.reward_config['trend_following_bonus']
+        
+        # ISSUE 2: Quick Loss Cut Bonus - Reward cutting losses quickly
+        if (hasattr(self, 'last_action_type') and 
+            self.last_action_type in ["CANCEL", "CLOSE", "CLOSE_LONG", "CLOSE_SHORT"] and
+            abs(self.position_size) < 0.001 and  # Position was closed
+            'quick_loss_cut_bonus' in self.reward_config):
+            
+            # Check if this was a loss that was cut quickly
+            if (hasattr(self, 'trade_start_step') and self.trade_start_step and
+                len(self.unrealized_pnl_history) >= 1 and
+                self.unrealized_pnl_history[-1] < self.reward_config.get('loss_cut_threshold', -0.01)):
+                
+                hold_duration = self.current_step - self.trade_start_step
+                max_hold_steps = self.reward_config.get('max_loss_hold_steps', 5)
+                if hold_duration <= max_hold_steps:
+                    positive_bonus += self.reward_config['quick_loss_cut_bonus']
+        
+        # ISSUE 3: Exit Strategy Differentiation
+        if hasattr(self, 'last_action_type'):
+            
+            # Penalty for CANCEL_CLOSE (panic exits)
+            if (self.last_action_type == "CANCEL" and 
+                'cancel_close_penalty' in self.reward_config):
+                positive_bonus -= self.reward_config['cancel_close_penalty']
+            
+            # Bonus for deliberate exits
+            elif (self.last_action_type in ["CLOSE_LONG", "CLOSE_SHORT"] and
+                  'deliberate_exit_bonus' in self.reward_config):
+                positive_bonus += self.reward_config['deliberate_exit_bonus']
+                
+                # Additional bonus for profit target achievement
+                if ('profit_target_achievement_bonus' in self.reward_config and
+                    len(self.unrealized_pnl_history) >= 1 and
+                    self.unrealized_pnl_history[-1] > self.reward_config.get('profit_target_threshold', 0.005)):
+                    positive_bonus += self.reward_config['profit_target_achievement_bonus']
+        
+        # ISSUE 4: Minimum Profitability Bonus
+        if (hasattr(self, 'last_action_type') and 
+            self.last_action_type in ["CLOSE", "CLOSE_LONG", "CLOSE_SHORT"] and
+            abs(self.position_size) < 0.001 and  # Position was closed
+            'minimum_profit_bonus' in self.reward_config):
+            
+            # Check if profit exceeded minimum threshold
+            if (len(self.unrealized_pnl_history) >= 1 and
+                self.unrealized_pnl_history[-1] > self.reward_config.get('minimum_profit_threshold', 0.005)):
+                positive_bonus += self.reward_config['minimum_profit_bonus']
+        
+        # === NEW ENHANCED REWARD COMPONENTS ===
+        
+        # PROGRESSIVE PROFIT MILESTONES
+        if (abs(self.position_size) > 0.001 and self.unrealized_pnl > 0 and 
+            self.entry_price > 0 and 'profit_milestone_bonuses' in self.reward_config):
+            
+            position_value = abs(self.position_size * self.entry_price)
+            if position_value > 0:
+                profit_pct = self.unrealized_pnl / position_value
+                
+                # Check profit milestones
+                for milestone, bonus in self.reward_config['profit_milestone_bonuses'].items():
+                    if profit_pct >= milestone:
+                        positive_bonus += bonus
+        
+        # MOMENTUM CONTINUATION REWARD
+        if (abs(self.position_size) > 0.001 and 
+            hasattr(self, 'last_action_type') and self.last_action_type == "HOLD" and
+            'momentum_continuation_bonus' in self.reward_config):
+            
+            # Check if momentum indicators align with position
+            current_momentum = self._safe_get_feature_data(self.current_step, 'price_momentum_5', 0)
+            if abs(current_momentum) > 0.01 and np.sign(current_momentum) == np.sign(self.position_side):
+                momentum_strength = abs(current_momentum)
+                if momentum_strength > 0.01:  # 1% momentum threshold
+                    momentum_bonus = self.reward_config['momentum_continuation_bonus'] * min(momentum_strength * 10, 2.0)
+                    positive_bonus += momentum_bonus
+        
+        # PATTERN HOLDING REWARD
+        if (abs(self.position_size) > 0.001 and self.trade_start_step and
+            'pattern_completion_bonus' in self.reward_config):
+            
+            hold_duration = self.current_step - self.trade_start_step
+            
+            # Check if key patterns are developing (support/resistance test)
+            support_distance = self._safe_get_feature_data(self.current_step, 'support_distance', 0)
+            resistance_distance = self._safe_get_feature_data(self.current_step, 'resistance_distance', 0)
+            
+            # Reward for holding through support/resistance levels
+            if self.position_side == 1 and resistance_distance < 0.02:  # Long approaching resistance
+                if hold_duration > 4:  # Held through pattern
+                    positive_bonus += self.reward_config['pattern_completion_bonus']
+            elif self.position_side == -1 and support_distance < 0.02:  # Short approaching support
+                if hold_duration > 4:  # Held through pattern
+                    positive_bonus += self.reward_config['pattern_completion_bonus']
+        
+        # ENHANCED POSITION HOLDING BONUS (replaces existing one)
+        enhanced_position_hold_bonus = 0.0
+        if self.position_size != 0 and self.trade_start_step:
+            hold_duration = self.current_step - self.trade_start_step
+            
+            # Progressive bonuses based on profitability and duration
+            if self.unrealized_pnl > 0:  # Profitable position
+                if (self.reward_config['optimal_hold_min'] <= hold_duration <= 
+                    self.reward_config['optimal_hold_max']):
+                    
+                    # Scale bonus by profitability
+                    profit_multiplier = 1.0
+                    if self.entry_price > 0:
+                        position_value = abs(self.position_size * self.entry_price)
+                        if position_value > 0:
+                            profit_pct = self.unrealized_pnl / position_value
+                            profit_multiplier = 1.0 + min(profit_pct * 5, 2.0)  # Up to 3x bonus for profitable positions
+                    
+                    enhanced_position_hold_bonus = self.reward_config['position_hold_bonus'] * profit_multiplier
+                    
+            elif hold_duration > self.reward_config['excessive_hold_threshold']:  # Penalize too long holds
+                enhanced_position_hold_bonus = -self.reward_config.get('position_hold_penalty', 0.01)
+        
+        # Add enhanced holding bonus to positive rewards
+        positive_bonus += enhanced_position_hold_bonus
+        
+        # POSITION-CONTEXT AWARE INACTIVITY PENALTY
+        inactivity_penalty = 0.0
+        if ('inactivity_penalty_start_steps' in self.reward_config and 
+            hasattr(self, 'last_action_type')):
+            
+            # Track steps since last meaningful action
+            if not hasattr(self, 'last_trade_step'):
+                self.last_trade_step = 0
+                
+            if self.last_action_type != "HOLD":
+                self.last_trade_step = self.current_step
+                
+            steps_since_last_trade = self.current_step - self.last_trade_step
+            
+            # Apply inactivity penalty based on position status
+            if abs(self.position_size) < 0.001:  # No position
+                # Regular inactivity penalty for flat positions
+                if steps_since_last_trade > self.reward_config['inactivity_penalty_start_steps']:
+                    steps_over = steps_since_last_trade - self.reward_config['inactivity_penalty_start_steps']
+                    base_penalty = self.reward_config.get('inactivity_penalty_base', 0.005)
+                    multiplier = self.reward_config.get('inactivity_penalty_multiplier', 1.2)
+                    max_steps = self.reward_config.get('inactivity_penalty_max_steps', 50)
+                    cap = self.reward_config.get('inactivity_penalty_cap', 0.5)
+                    
+                    if steps_over < max_steps:
+                        inactivity_penalty = min(base_penalty * (multiplier ** steps_over), cap)
+                    else:
+                        inactivity_penalty = cap
+            else:  # Has position
+                # REDUCE penalty when holding profitable positions
+                if self.unrealized_pnl > 0:
+                    # Apply reduced inactivity penalty for profitable positions
+                    if steps_since_last_trade > self.reward_config['inactivity_penalty_start_steps'] * 3:  # 3x more patient
+                        profit_ratio = min(self.unrealized_pnl / abs(self.position_size * self.entry_price), 0.1) if self.entry_price > 0 else 0
+                        inactivity_reduction = 0.9 - profit_ratio * 5  # Up to 95% reduction for very profitable positions
+                        steps_over = steps_since_last_trade - (self.reward_config['inactivity_penalty_start_steps'] * 3)
+                        base_penalty = self.reward_config.get('inactivity_penalty_base', 0.005) * max(inactivity_reduction, 0.05)
+                        inactivity_penalty = min(base_penalty * steps_over * 0.1, 0.05)  # Much smaller penalty
+                else:
+                    # Normal inactivity penalty for losing positions (encourage action)
+                    if steps_since_last_trade > self.reward_config['inactivity_penalty_start_steps']:
+                        steps_over = steps_since_last_trade - self.reward_config['inactivity_penalty_start_steps']
+                        base_penalty = self.reward_config.get('inactivity_penalty_base', 0.005)
+                        inactivity_penalty = min(base_penalty * steps_over * 1.5, 0.3)  # Encourage action on losing positions
+        
         # === COMBINE ALL COMPONENTS ===
         total_penalty = (
             risk_penalty + 
@@ -2499,11 +2981,61 @@ class FuturesTradingEnv(gym.Env):
             volatility_penalty + 
             cost_penalty + 
             special_penalty +
-            overtrading_penalty  # Include anti-overtrading penalty
+            overtrading_penalty +  # Include anti-overtrading penalty
+            inactivity_penalty     # Include position-context aware inactivity penalty
         )
         
         # Apply dynamic loss multiplier
         total_penalty *= self.loss_penalty_multiplier
+        
+        # === NEW PENALTY COMPONENTS FOR IMPROVED TRADING BEHAVIOR ===
+        
+        # ISSUE 1: Penalty for exiting profitable trends
+        exit_profitable_trend_penalty = 0.0
+        if (hasattr(self, 'last_action_type') and 
+            self.last_action_type in ["CANCEL", "CLOSE", "CLOSE_LONG", "CLOSE_SHORT"] and
+            abs(self.position_size) < 0.001 and  # Position was closed
+            'exit_profitable_trend_penalty' in self.reward_config):
+            
+            # Check if we exited during a profitable trend
+            if (len(self.unrealized_pnl_history) >= 2 and
+                self.unrealized_pnl_history[-1] > 0):  # Was profitable
+                
+                recent_pnl_change = self.unrealized_pnl_history[-1] - self.unrealized_pnl_history[-2]
+                profitable_trend_threshold = self.reward_config.get('profitable_trend_threshold', 0.02)
+                
+                if recent_pnl_change > profitable_trend_threshold:  # Strong positive trend
+                    exit_profitable_trend_penalty = self.reward_config['exit_profitable_trend_penalty']
+        
+        # ISSUE 4: Small position and fee ratio penalties
+        small_position_penalty = 0.0
+        excessive_fee_penalty = 0.0
+        
+        if hasattr(self, '_last_fees') and self._last_fees > 0:
+            # Penalty for small positions relative to fees
+            if ('small_position_penalty' in self.reward_config and
+                hasattr(self, 'position_size') and abs(self.position_size) > 0):
+                
+                current_price = self._safe_get_price_data(self.current_step, 'close', 50000.0)
+                position_value = abs(self.position_size) * current_price
+                small_threshold = self.reward_config.get('small_position_threshold', 50.0)
+                
+                if position_value < small_threshold:
+                    small_position_penalty = self.reward_config['small_position_penalty']
+            
+            # Penalty for excessive fee ratios
+            if ('excessive_fee_ratio_penalty' in self.reward_config and
+                hasattr(self, 'position_size') and abs(self.position_size) > 0):
+                
+                current_price = self._safe_get_price_data(self.current_step, 'close', 50000.0)
+                trade_value = abs(self.position_size) * current_price
+                
+                if trade_value > 0:
+                    fee_ratio = self._last_fees / trade_value
+                    fee_threshold = self.reward_config.get('fee_ratio_penalty_threshold', 0.1)
+                    
+                    if fee_ratio > fee_threshold:
+                        excessive_fee_penalty = self.reward_config['excessive_fee_ratio_penalty']
         
         # Add safety intervention penalties (teach agent not to attempt extreme actions)
         safety_penalty = getattr(self, 'safety_intervention_penalty', 0.0)
@@ -2527,7 +3059,8 @@ class FuturesTradingEnv(gym.Env):
             safety_penalty + extreme_leverage_penalty + position_state_penalty + zero_pnl_penalty + 
             dust_position_penalty + phantom_trade_penalty + invalid_entry_penalty + 
             zero_pnl_detection_penalty + zero_pnl_close_penalty + excessive_modification_penalty + 
-            fee_cap_penalty + entry_price_fallback_penalty + critical_trade_block_penalty
+            fee_cap_penalty + entry_price_fallback_penalty + critical_trade_block_penalty +
+            exit_profitable_trend_penalty + small_position_penalty + excessive_fee_penalty  # NEW PENALTIES
         )
         total_penalty += all_penalty_categories
         
@@ -2569,7 +3102,7 @@ class FuturesTradingEnv(gym.Env):
             padding = np.zeros((self.window_size - market_features.shape[0], market_features.shape[1]))
             market_features = np.vstack([padding, market_features])
         
-        # Enhanced Portfolio features (12 features total)
+        # Enhanced Portfolio features (13 features total - expanded for better position context)
         drawdown = (self.max_equity - self.equity) / self.max_equity if self.max_equity > 0 else 0
         equity_ratio = self.equity / self.initial_equity if self.initial_equity > 0 else 0
         balance_ratio = self.balance / self.initial_equity if self.initial_equity > 0 else 0
@@ -2590,7 +3123,37 @@ class FuturesTradingEnv(gym.Env):
             else:
                 pnl_trend_feature = np.clip(recent_pnl - older_pnl, -100.0, 100.0) / 100.0
         
-        # ENHANCED 9-FEATURE PORTFOLIO STATE (added PnL trend)
+        # === NEW ENHANCED POSITION CONTEXT FEATURES ===
+        # Position age (how long position has been held)
+        position_age = 0.0
+        if self.trade_start_step is not None and abs(self.position_size) > 0.001:
+            position_age = (self.current_step - self.trade_start_step) / 100.0  # Normalized by 100 steps
+            position_age = min(position_age, 2.0)  # Cap at 200 steps
+        
+        # Unrealized PnL as percentage of position value
+        unrealized_pnl_pct = 0.0
+        if abs(self.position_size) > 0.001 and self.entry_price > 0:
+            position_value = abs(self.position_size * self.entry_price)
+            if position_value > 0:
+                unrealized_pnl_pct = np.clip(self.unrealized_pnl / position_value, -2.0, 2.0)  # Cap at ±200%
+        
+        # Distance from entry price (normalized)
+        distance_from_entry = 0.0
+        if self.entry_price > 0 and abs(self.position_size) > 0.001:
+            current_price = self._safe_get_price_data(self.current_step, 'close')
+            if current_price > 0:
+                distance_from_entry = (current_price - self.entry_price) / self.entry_price
+                distance_from_entry = np.clip(distance_from_entry, -1.0, 1.0)  # Cap at ±100%
+        
+        # Position-trend alignment (is position aligned with momentum?)
+        position_trend_alignment = 0.0
+        if abs(self.position_size) > 0.001:
+            # Get current momentum from features
+            current_momentum = self._safe_get_feature_data(self.current_step, 'price_momentum_5', 0)
+            if abs(current_momentum) > 0.001:  # Only if there's significant momentum
+                position_trend_alignment = np.sign(self.position_side) * np.sign(current_momentum)
+        
+        # ENHANCED 13-FEATURE PORTFOLIO STATE
         portfolio_features = np.array([
             # Core state (4 essential features)
             equity_ratio,  # Current equity / initial equity
@@ -2605,7 +3168,13 @@ class FuturesTradingEnv(gym.Env):
             # Trading behavior & PnL trend (3 features)
             min(self.consecutive_losses / 5.0, 1.0),  # Normalized consecutive losses (cap at 5)
             balance_trend,  # Recent balance change trend
-            pnl_trend_feature,  # NEW: Unrealized PnL trend (-1 to +1)
+            pnl_trend_feature,  # Unrealized PnL trend (-1 to +1)
+            
+            # NEW: Enhanced position context (4 features)
+            position_age,              # How long position has been held (normalized)
+            unrealized_pnl_pct,        # Unrealized PnL as % of position value
+            distance_from_entry,       # Price distance from entry (normalized)
+            position_trend_alignment,  # Position-trend alignment score (-1 to +1)
         ], dtype=np.float32)
         
         # Ensure no NaN or inf values
@@ -3025,6 +3594,34 @@ class FuturesTradingEnv(gym.Env):
             'final_reward_positive_cap': 15.0,
             'final_reward_negative_cap': -25.0,
             'severe_loss_reward_cap': -50.0,
+            
+            # === NEW PARAMETERS FOR IMPROVED TRADING BEHAVIOR ===
+            # (Default to 0.0 for backward compatibility)
+            
+            # ISSUE 1: Trend following bonuses
+            'trend_following_bonus': 0.0,
+            'trend_following_threshold': 0.01,
+            'exit_profitable_trend_penalty': 0.0,
+            'profitable_trend_threshold': 0.02,
+            
+            # ISSUE 2: Quick loss cutting rewards
+            'quick_loss_cut_bonus': 0.0,
+            'loss_cut_threshold': -0.01,
+            'max_loss_hold_steps': 5,
+            
+            # ISSUE 3: Exit strategy differentiation
+            'cancel_close_penalty': 0.0,
+            'deliberate_exit_bonus': 0.0,
+            'profit_target_achievement_bonus': 0.0,
+            'profit_target_threshold': 0.005,
+            
+            # ISSUE 4: Minimum profitability requirements
+            'minimum_profit_threshold': 0.005,
+            'minimum_profit_bonus': 0.0,
+            'small_position_penalty': 0.0,
+            'small_position_threshold': 50.0,
+            'fee_ratio_penalty_threshold': 0.1,
+            'excessive_fee_ratio_penalty': 0.0,
         }
         
         # Start with defaults

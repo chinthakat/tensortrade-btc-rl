@@ -278,7 +278,7 @@ def get_training_parameters() -> Dict[str, Any]:
     # Window size
     params['window_size'] = IntPrompt.ask(
         "📊 Lookback window size",
-        default=60,
+        default=20,  # RESTORED: Back to 20 for consistency (was 60)
         show_default=True
     )
     
@@ -570,7 +570,7 @@ def load_data(file_path: str) -> pd.DataFrame:
         console.print(f"[red]❌ Error loading data: {str(e)}[/red]")
         return None
 
-def create_train_val_environments(df: pd.DataFrame, params: Dict[str, Any], log_file: str = None, training_iteration: int = 0, train_ratio: float = 0.7):
+def create_train_val_environments(df: pd.DataFrame, params: Dict[str, Any], log_file: str = None, training_iteration: int = 0, train_ratio: float = 0.7, reward_config=None):
     """Create separate training and validation environments with proper data splitting"""
     
     # Calculate validation ratio to ensure they don't exceed 1.0
@@ -592,7 +592,8 @@ def create_train_val_environments(df: pd.DataFrame, params: Dict[str, Any], log_
         liquidation_fee_rate=params['liquidation_fee_rate'],
         log_file=log_file,
         training_iteration=training_iteration,
-        use_advanced_action_space=params.get('use_advanced_action_space', True)  # Read from config
+        use_advanced_action_space=params.get('use_advanced_action_space', True),  # Read from config
+        reward_config=reward_config  # Pass the reward configuration
     )
     
     # Wrap both environments for algorithm compatibility
@@ -604,7 +605,7 @@ def create_train_val_environments(df: pd.DataFrame, params: Dict[str, Any], log_
     
     return wrapped_train_env, wrapped_val_env
 
-def create_environment(df: pd.DataFrame, params: Dict[str, Any], log_file: str = None, training_iteration: int = 0):
+def create_environment(df: pd.DataFrame, params: Dict[str, Any], log_file: str = None, training_iteration: int = 0, reward_config=None):
     """Create trading environment with specified parameters (legacy function for backward compatibility)"""
     env = FuturesTradingEnv(
         df=df,
@@ -617,7 +618,8 @@ def create_environment(df: pd.DataFrame, params: Dict[str, Any], log_file: str =
         liquidation_fee_rate=params['liquidation_fee_rate'],
         log_file=log_file,
         training_iteration=training_iteration,
-        use_advanced_action_space=params.get('use_advanced_action_space', True)  # Read from config
+        use_advanced_action_space=params.get('use_advanced_action_space', True),  # Read from config
+        reward_config=reward_config  # Pass the reward configuration
     )
     
     # Wrap environment for PPO compatibility (Dict → Box conversion)
@@ -992,9 +994,20 @@ def train_model(
         console.print(f"[red]❌ Training failed: {str(e)}[/red]")
         return None
 
-def main():
-    """Main training function"""
+def main(reward_config=None):
+    """Main training function
+    
+    Args:
+        reward_config (dict, optional): Custom reward configuration to use instead of default
+    """
     display_welcome()
+    
+    # Show reward configuration status
+    if reward_config is not None:
+        console.print("[bold green]🎯 Using Custom Reward Configuration[/bold green]")
+        console.print("[dim]Enhanced trading behavior improvements active[/dim]\n")
+    else:
+        console.print("[bold]🎯 Using Default Reward Configuration[/bold]\n")
     
     # Archive old logs before starting training
     console.print("[bold]🗂️  Archiving old logs before training...[/bold]")
@@ -1118,7 +1131,8 @@ def main():
             params=training_params,
             log_file=log_file,
             training_iteration=0,
-            train_ratio=training_params.get('train_ratio', 0.7)
+            train_ratio=training_params.get('train_ratio', 0.7),
+            reward_config=reward_config  # Pass the reward configuration
         )
         
         # Create environment functions for training
@@ -1128,7 +1142,8 @@ def main():
                 params=training_params,
                 log_file=log_file,
                 training_iteration=0,
-                train_ratio=training_params.get('train_ratio', 0.7)
+                train_ratio=training_params.get('train_ratio', 0.7),
+                reward_config=reward_config  # Pass the reward configuration
             )[0]  # Return only training environment
             
         def val_env_fn():
@@ -1137,7 +1152,8 @@ def main():
                 params=training_params,
                 log_file=log_file,
                 training_iteration=0,
-                train_ratio=training_params.get('train_ratio', 0.7)
+                train_ratio=training_params.get('train_ratio', 0.7),
+                reward_config=reward_config  # Pass the reward configuration
             )[1]  # Return only validation environment
         
         # Save configuration
@@ -1147,7 +1163,8 @@ def main():
             "algorithm": algorithm_config[0],
             "training_params": training_params,
             "hyperparameters": hyperparams,
-            "timestamp": timestamp
+            "timestamp": timestamp,
+            "reward_config_used": "custom" if reward_config is not None else "default"
         }
         
         # Configuration saving menu

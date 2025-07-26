@@ -60,6 +60,8 @@ def timeout_confirmation(prompt: str, timeout_seconds: int = 60, default: bool =
         True to continue, False to stop
     """
     import threading
+    import sys
+    import select
     
     console.print(f"\n[yellow]{prompt}[/yellow]")
     console.print(f"[dim]Auto-continuing in {timeout_seconds} seconds...[/dim]")
@@ -67,17 +69,23 @@ def timeout_confirmation(prompt: str, timeout_seconds: int = 60, default: bool =
     
     result = [default]  # Use list to allow modification in nested function
     input_received = [False]
+    stop_countdown = [False]
     
     def get_input():
         try:
             user_input = input().strip().lower()
             input_received[0] = True
-            if user_input in ['n', 'no']:
+            stop_countdown[0] = True
+            if user_input in ['n', 'no', 'stop', 'quit']:
                 result[0] = False
+                console.print("[yellow]⛔ User chose to stop training[/yellow]")
             else:
                 result[0] = True
-        except:
+                console.print("[green]✅ User chose to continue[/green]")
+        except Exception as e:
+            console.print(f"[dim]Input error: {e}[/dim]")
             result[0] = default
+            stop_countdown[0] = True
     
     # Start input thread
     input_thread = threading.Thread(target=get_input, daemon=True)
@@ -86,13 +94,16 @@ def timeout_confirmation(prompt: str, timeout_seconds: int = 60, default: bool =
     # Countdown with progress
     try:
         for i in range(timeout_seconds, 0, -1):
-            if input_received[0]:
+            if stop_countdown[0]:
                 break
-            console.print(f"[dim]Auto-continuing in {i:2d} seconds...[/dim]", end="\r")
+            console.print(f"[dim]Auto-continuing in {i:2d} seconds... (Press Enter or type 'n')[/dim]", end="\r")
             time.sleep(1)
         
+        console.print("")  # Clear the countdown line
+        
         if not input_received[0]:
-            console.print(f"\n[green]✅ Auto-continuing to next episode[/green]")
+            console.print(f"[green]✅ Auto-continuing to next episode (timeout)[/green]")
+            result[0] = default
         
         return result[0]
         
@@ -209,12 +220,14 @@ class EpisodeTracker:
 class MultiEpisodeTrainer:
     """Multi-episode training system with model persistence"""
     
-    def __init__(self, data_path: str, base_config: Dict, starting_model_path: Optional[str] = None, validation_pct: float = 0.05, use_simple_split: bool = True):
+    def __init__(self, data_path: str, base_config: Dict, starting_model_path: Optional[str] = None, validation_pct: float = 0.05, use_simple_split: bool = True, num_episodes: int = 1, reward_config=None):
         self.data_path = data_path
         self.base_config = base_config
         self.starting_model_path = starting_model_path
         self.validation_pct = validation_pct
         self.use_simple_split = use_simple_split
+        self.num_episodes_requested = num_episodes
+        self.reward_config = reward_config  # Store the reward configuration
         self.episode_tracker = EpisodeTracker()
         
         # Load data
@@ -227,7 +240,8 @@ class MultiEpisodeTrainer:
         # Split data for episodes
         self.data_splits = self._create_data_splits(
             validation_pct=self.validation_pct, 
-            use_walk_forward=not self.use_simple_split
+            use_walk_forward=not self.use_simple_split,
+            num_episodes=num_episodes
         )
         
         # Training state
@@ -279,7 +293,7 @@ class MultiEpisodeTrainer:
         
         console.print(f"✅ [green]Data cleaning completed: {len(self.df)} valid rows[/green]")
     
-    def _create_data_splits(self, validation_pct: float = 0.05, use_walk_forward: bool = False) -> List[Tuple[pd.DataFrame, pd.DataFrame]]:
+    def _create_data_splits(self, validation_pct: float = 0.05, use_walk_forward: bool = False, num_episodes: int = 1) -> List[Tuple[pd.DataFrame, pd.DataFrame]]:
         """Create train/validation split - simple split (default) or walk-forward splits"""
         
         if use_walk_forward:
@@ -302,8 +316,16 @@ class MultiEpisodeTrainer:
         console.print(f"   📋 Validation data: {len(val_data):,} rows ({validation_pct*100:.0f}%)")
         console.print(f"   🎯 Training will use {len(train_data):,} rows instead of ~10,000!")
         
-        # Return as single split for compatibility
-        return [(train_data, val_data)]
+        # For multi-episode training with simple split, replicate the same split
+        # This allows different episodes to train on the same data with different random seeds/hyperparameters
+        splits = []
+        for episode in range(num_episodes):
+            splits.append((train_data.copy(), val_data.copy()))
+            
+        if num_episodes > 1:
+            console.print(f"   🔄 Replicated split for {num_episodes} episodes (each episode will use the same data)")
+        
+        return splits
     
     def _create_walk_forward_splits(self, min_train_size: int = 10000, validation_size: int = 2000) -> List[Tuple[pd.DataFrame, pd.DataFrame]]:
         """Create walk-forward data splits for episodes (legacy approach)"""
@@ -372,6 +394,7 @@ class MultiEpisodeTrainer:
                 log_file=instance_log_file,
                 training_iteration=episode_num,
                 use_advanced_action_space=True,  # Enable advanced action space by default
+                reward_config=self.reward_config,  # Pass the reward configuration
                 **env_params
             )
             # Wrap environment for PPO compatibility
@@ -617,13 +640,33 @@ class MultiEpisodeTrainer:
         
         try:
             for episode_num in range(num_episodes):
+                console.print(f"\n[bold cyan]🔄 Starting Episode {episode_num + 1} of {num_episodes}[/bold cyan]")
+                
+                # Check if we have enough data splits
+                if episode_num >= len(self.data_splits):
+                    console.print(f"[red]❌ No data split available for episode {episode_num + 1}[/red]")
+                    console.print(f"[yellow]Available splits: {len(self.data_splits)}, Requested episode: {episode_num + 1}[/yellow]")
+                    break
+                
                 train_data, val_data = self.data_splits[episode_num]
+                
+                # Validate data
+                if train_data is None or val_data is None:
+                    console.print(f"[red]❌ Invalid data for episode {episode_num + 1}[/red]")
+                    break
+                
+                if len(train_data) == 0 or len(val_data) == 0:
+                    console.print(f"[red]❌ Empty data for episode {episode_num + 1}[/red]")
+                    console.print(f"Train data: {len(train_data)} rows, Val data: {len(val_data)} rows")
+                    break
                 
                 # For the first episode, use starting model if available
                 # For subsequent episodes, continue from best
                 continue_from_best = episode_num > 0 or self.starting_model_path is not None
+                console.print(f"[cyan]📚 Continue from best: {continue_from_best}[/cyan]")
                 
                 # Train episode
+                console.print(f"[cyan]🎯 Training episode {episode_num + 1}...[/cyan]")
                 model_path = self.train_episode(
                     episode_num=episode_num,
                     train_data=train_data,
@@ -635,20 +678,33 @@ class MultiEpisodeTrainer:
                 )
                 
                 if model_path is None:
-                    console.print(f"[red]Episode {episode_num + 1} failed, stopping training[/red]")
+                    console.print(f"[red]❌ Episode {episode_num + 1} failed, stopping training[/red]")
                     break
+                
+                console.print(f"[green]✅ Episode {episode_num + 1} completed successfully[/green]")
+                console.print(f"[cyan]💾 Model saved to: {model_path}[/cyan]")
                 
                 # Ask if user wants to continue to next episode with 60-second timeout
                 if episode_num < num_episodes - 1:
-                    console.print(f"\n[yellow]Episode {episode_num + 1} completed[/yellow]")
+                    console.print(f"\n[yellow]🎉 Episode {episode_num + 1} completed[/yellow]")
                     console.print(f"[cyan]💤 60-second break before next episode...[/cyan]")
+                    console.print(f"[dim]Next episode: {episode_num + 2} of {num_episodes}[/dim]")
                     
-                    if not timeout_confirmation("Continue to next episode?", timeout_seconds=60, default=True):
-                        console.print("[yellow]Training stopped by user[/yellow]")
+                    should_continue = timeout_confirmation("Continue to next episode?", timeout_seconds=60, default=True)
+                    console.print(f"[cyan]👀 User decision: {'Continue' if should_continue else 'Stop'}[/cyan]")
+                    
+                    if not should_continue:
+                        console.print("[yellow]⛔ Training stopped by user[/yellow]")
                         break
+                else:
+                    console.print(f"\n[green]🎉 All {num_episodes} episodes completed![/green]")
         
         except KeyboardInterrupt:
             console.print("\n[yellow]⚠️  Multi-episode training interrupted[/yellow]")
+        except Exception as e:
+            console.print(f"\n[red]❌ Unexpected error in multi-episode training: {str(e)}[/red]")
+            import traceback
+            console.print(f"[dim]Traceback: {traceback.format_exc()}[/dim]")
         
         # Final summary
         console.print("\n[bold]🎉 Multi-Episode Training Complete![/bold]")
@@ -684,7 +740,7 @@ class MultiEpisodeTrainer:
             
             # Extract useful info from the original path for naming
             if "episode_" in self.best_model_path:
-                episode_info = self.best_model_path.split("episode_")[1].split("/")[0]
+                episode_info = self.best_model_path.split("episode_")[1].split(os.sep)[0]
             else:
                 episode_info = "multi_episode"
             
@@ -692,11 +748,33 @@ class MultiEpisodeTrainer:
             new_filename = f"best_multi_episode_{episode_info}_{timestamp}.zip"
             destination_path = models_dir / new_filename
             
-            # Copy the best model to general models folder
-            shutil.copy2(self.best_model_path, destination_path)
+            # Debug: Print paths
+            console.print(f"[cyan]Debug - Source path: {self.best_model_path}[/cyan]")
+            console.print(f"[cyan]Debug - Destination path: {destination_path}[/cyan]")
+            console.print(f"[cyan]Debug - Episode info: {episode_info}[/cyan]")
             
-            console.print(f"\n[bold green]✅ Best model saved to general models folder![/bold green]")
-            console.print(f"📁 Saved as: [green]{new_filename}[/green]")
+            # Ensure source file exists
+            if not os.path.exists(self.best_model_path):
+                console.print(f"[red]❌ Source file does not exist: {self.best_model_path}[/red]")
+                return
+            
+            # Ensure destination directory exists
+            destination_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Check if source and destination are different files to avoid "same file" error
+            source_path = Path(self.best_model_path).resolve()
+            dest_path = destination_path.resolve()
+            
+            if source_path != dest_path:
+                # Copy the best model to general models folder
+                shutil.copy2(self.best_model_path, destination_path)
+                
+                console.print(f"\n[bold green]✅ Best model saved to general models folder![/bold green]")
+                console.print(f"📁 Saved as: [green]{new_filename}[/green]")
+            else:
+                console.print(f"\n[bold yellow]⚠️ Source and destination are the same file, skipping copy[/bold yellow]")
+                console.print(f"📁 File: [green]{new_filename}[/green]")
+            
             if self.best_performance:
                 console.print(f"📊 Model performance: {self.best_performance['total_return_pct']:.2f}% return")
             else:
@@ -704,8 +782,16 @@ class MultiEpisodeTrainer:
             
             # Also update the best_model.zip (traditional location)
             best_model_path = models_dir / "best_model.zip"
-            shutil.copy2(self.best_model_path, best_model_path)
-            console.print(f"🔄 Also updated: [green]best_model.zip[/green]")
+            
+            # Check if source and destination are different files to avoid "same file" error
+            source_path = Path(self.best_model_path).resolve()
+            dest_path = best_model_path.resolve()
+            
+            if source_path != dest_path:
+                shutil.copy2(self.best_model_path, best_model_path)
+                console.print(f"🔄 Also updated: [green]best_model.zip[/green]")
+            else:
+                console.print(f"🔄 [yellow]best_model.zip is already the current best model[/yellow]")
             
         except Exception as e:
             console.print(f"[red]❌ Error saving best model to general folder: {str(e)}[/red]")
@@ -887,9 +973,20 @@ def cleanup_all_models():
         console.print(f"\n[red]❌ Error during cleanup: {str(e)}[/red]")
         return False
 
-def setup_multi_episode_training():
-    """Setup and run multi-episode training"""
+def setup_multi_episode_training(reward_config=None):
+    """Setup and run multi-episode training
+    
+    Args:
+        reward_config (dict, optional): Custom reward configuration to use instead of default
+    """
     console.print("[bold]🎯 Multi-Episode Training Setup[/bold]")
+    
+    # Show reward configuration status
+    if reward_config is not None:
+        console.print("[bold green]🎯 Using Custom Reward Configuration[/bold green]")
+        console.print("[dim]Enhanced trading behavior improvements active[/dim]\n")
+    else:
+        console.print("[bold]🎯 Using Default Reward Configuration[/bold]\n")
     
     # Get data file
     from pathlib import Path
@@ -1044,7 +1141,7 @@ def setup_multi_episode_training():
         use_simple_split = False
     
     # Training configuration
-    num_episodes = IntPrompt.ask("Number of episodes to train", default=1)
+    num_episodes = IntPrompt.ask("Number of episodes to train", default=3)
     timesteps_per_episode = IntPrompt.ask("Timesteps per episode", default=50000)
     
     # Model architecture selection
@@ -1092,7 +1189,9 @@ def setup_multi_episode_training():
         base_config, 
         starting_model_path=starting_model_path,
         validation_pct=validation_pct,
-        use_simple_split=use_simple_split
+        use_simple_split=use_simple_split,
+        num_episodes=num_episodes,
+        reward_config=reward_config  # Pass the reward configuration
     )
     trainer.run_multi_episode_training(
         num_episodes=num_episodes,

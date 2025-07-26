@@ -11,6 +11,7 @@ from typing import Dict, List, Tuple, Optional
 import json
 from datetime import datetime
 from pathlib import Path
+from gymnasium import spaces
 
 from rich.console import Console
 from rich.table import Table
@@ -63,7 +64,7 @@ class TradingBacktester:
             "training_params": {
                 "initial_equity": 10000.0,
                 "max_leverage": 25.0,
-                "window_size": 60,
+                "window_size": 20,  # Fixed: Match model training configuration (was 60)
                 "stop_loss_pct": 0.02,
                 "take_profit_pct": 0.04
             }
@@ -105,6 +106,82 @@ class TradingBacktester:
         else:
             # Default to PPO
             self.model = PPO.load(self.model_path)
+        
+        # Validate observation space compatibility
+        try:
+            # Test observation shape compatibility
+            test_obs, _ = self.env.reset()
+            
+            # Handle both Dict and Box observation spaces
+            if isinstance(self.model.observation_space, spaces.Dict):
+                # Model expects dict observations
+                if not isinstance(test_obs, dict):
+                    raise ValueError(f"Model expects dict observation but environment provides {type(test_obs)}")
+                
+                # Check each component of the dict observation space
+                for key in self.model.observation_space.spaces.keys():
+                    expected_shape = self.model.observation_space.spaces[key].shape
+                    if key not in test_obs:
+                        raise ValueError(f"Missing observation key: {key}")
+                    actual_shape = test_obs[key].shape
+                    
+                    if expected_shape != actual_shape:
+                        console.print(f"[red]⚠️  OBSERVATION SHAPE MISMATCH for {key}![/red]")
+                        console.print(f"   Model expects: {expected_shape}")
+                        console.print(f"   Environment provides: {actual_shape}")
+                        
+                        # Try to fix window_size automatically for market_features
+                        if key == 'market_features' and len(expected_shape) == 2 and len(actual_shape) == 2:
+                            expected_window = expected_shape[0]
+                            console.print(f"[yellow]🔧 Auto-fixing window_size: {self.config['training_params']['window_size']} → {expected_window}[/yellow]")
+                            
+                            # Recreate environment with correct window size
+                            self.config["training_params"]["window_size"] = expected_window
+                            self.env = FuturesTradingEnv(
+                                df=df,
+                                log_file=log_file,
+                                use_advanced_action_space=True,
+                                **self.config["training_params"]
+                            )
+                            self.env = wrap_environment_for_algorithm(self.env, "PPO")
+                            console.print("[green]✅ Environment recreated with correct window size[/green]")
+                            break
+                        else:
+                            raise ValueError(f"Cannot auto-fix observation shape mismatch for {key}: {expected_shape} vs {actual_shape}")
+            else:
+                # Model expects simple Box observation space
+                if isinstance(test_obs, dict):
+                    raise ValueError(f"Model expects Box observation but environment provides dict")
+                
+                expected_shape = self.model.observation_space.shape
+                actual_shape = test_obs.shape
+                
+                if expected_shape != actual_shape:
+                    console.print(f"[red]⚠️  OBSERVATION SHAPE MISMATCH DETECTED![/red]")
+                    console.print(f"   Model expects: {expected_shape}")
+                    console.print(f"   Environment provides: {actual_shape}")
+                    
+                    # Try to fix window_size automatically
+                    if len(expected_shape) == 2 and len(actual_shape) == 2:
+                        expected_window = expected_shape[0]
+                        console.print(f"[yellow]🔧 Auto-fixing window_size: {self.config['training_params']['window_size']} → {expected_window}[/yellow]")
+                        
+                        # Recreate environment with correct window size
+                        self.config["training_params"]["window_size"] = expected_window
+                        self.env = FuturesTradingEnv(
+                            df=df,
+                            log_file=log_file,
+                            use_advanced_action_space=True,
+                            **self.config["training_params"]
+                        )
+                        self.env = wrap_environment_for_algorithm(self.env, "PPO")
+                        console.print("[green]✅ Environment recreated with correct window size[/green]")
+                    else:
+                        raise ValueError(f"Cannot auto-fix observation shape mismatch: {expected_shape} vs {actual_shape}")
+            
+        except Exception as e:
+            console.print(f"[red]❌ Model-environment compatibility check failed: {e}[/red]")
+            raise
         
         console.print("✅ Model and environment loaded successfully")
     

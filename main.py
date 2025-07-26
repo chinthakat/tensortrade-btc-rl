@@ -21,6 +21,12 @@ sys.path.append(str(current_dir))
 # Import log archiver
 from log_archiver import archive_startup_logs
 
+# Import improved reward configurations
+from improved_reward_configs import TREND_RIDER_CONFIG, MAX_PROFIT_CONFIG
+
+# Import trade anomaly analyzer
+from trade_anomaly_analyzer import TradeAnomalyAnalyzer
+
 console = Console()
 
 def display_main_menu():
@@ -37,15 +43,18 @@ def display_main_menu():
     menu_table.add_column("Description", style="white")
     
     menu_options = [
-        ("1", "🎯 Train New Model"),
-        ("2", "🔄 Multi-Episode Training"),
+        ("1", "🎯 Train New Model (with reward configuration selection)"),
+        ("2", "🔄 Multi-Episode Training (with reward configuration selection)"),
         ("3", "📊 Backtest Existing Model"),
         ("4", "📈 Live Trading (Testnet/Live)"),
         ("5", "🔧 Data Preprocessing"),
         ("6", "📋 View Training History"),
-        ("7", "🗂️ Archive Old Logs"),
-        ("8", "❓ Help & Documentation"),
-        ("9", "❌ Exit")
+        ("7", "� Analyze Episode Performance"),
+        ("8", "�🗂️ Archive Old Logs"),
+        ("9", "❓ Help & Documentation"),
+        ("10", "🚨 Trade Anomaly Analysis"),
+        ("11", "🗂️ Archive Old Logs"),
+        ("12", "❌ Exit")
     ]
     
     for option, description in menu_options:
@@ -84,6 +93,106 @@ def check_dependencies():
     
     return True
 
+def select_reward_configuration():
+    """Select reward configuration for training"""
+    console.print("[bold]🎯 Select Reward Configuration[/bold]")
+    
+    reward_options = [
+        ("1", "🏛️ Default Configuration (Conservative baseline)"),
+        ("2", "🚀 TREND_RIDER Configuration (Enhanced for longer positions)"),
+        ("3", "💰 MAX_PROFIT Configuration (Aggressive profit maximization)"),
+        ("4", "📋 View Configuration Details")
+    ]
+    
+    table = Table(title="Available Reward Configurations", show_header=False)
+    table.add_column("Option", style="cyan", width=4)
+    table.add_column("Description", style="white")
+    
+    for option, description in reward_options:
+        table.add_row(option, description)
+    
+    console.print(table)
+    
+    choice = IntPrompt.ask("Select reward configuration", default=2)
+    
+    if choice == 1:
+        console.print("[green]✅ Selected: Default Configuration[/green]")
+        return None  # Use default config in environment
+    elif choice == 2:
+        console.print("[green]✅ Selected: TREND_RIDER Configuration[/green]")
+        return TREND_RIDER_CONFIG
+    elif choice == 3:
+        console.print("[green]✅ Selected: MAX_PROFIT Configuration[/green]")
+        return MAX_PROFIT_CONFIG
+    elif choice == 4:
+        show_reward_config_details()
+        return select_reward_configuration()  # Recursively call again
+    else:
+        console.print("[yellow]Invalid choice, using TREND_RIDER Configuration[/yellow]")
+        return TREND_RIDER_CONFIG
+
+def show_reward_config_details():
+    """Show detailed comparison of reward configurations"""
+    console.print("\n[bold]📋 Reward Configuration Details[/bold]\n")
+    
+    # Create comparison table
+    comparison_table = Table(title="Key Parameter Comparison")
+    comparison_table.add_column("Parameter", style="cyan")
+    comparison_table.add_column("Default", style="white")
+    comparison_table.add_column("TREND_RIDER", style="green")
+    comparison_table.add_column("MAX_PROFIT", style="yellow")
+    
+    # Key parameters to compare
+    key_params = [
+        ("position_hold_bonus", "0.5", "3.0 (6x)", "5.0 (10x)"),
+        ("cost_penalty_multiplier", "500", "200 (lower)", "100 (very low)"),
+        ("optimal_hold_max", "24", "96 (4x)", "144 (6x)"),
+        ("trend_following_bonus", "0.0", "0.05 (NEW)", "0.05 (NEW)"),
+        ("profit_milestone_bonuses", "None", "Progressive", "Higher Progressive"),
+        ("cancel_close_penalty", "0.0", "0.03 (NEW)", "0.01 (minimal)"),
+        ("pattern_completion_bonus", "0.0", "0.10 (NEW)", "0.10 (NEW)")
+    ]
+    
+    for param, default, trend_rider, max_profit in key_params:
+        comparison_table.add_row(param, default, trend_rider, max_profit)
+    
+    console.print(comparison_table)
+    
+    # Show configuration details
+    config_details = """
+🚀 TREND_RIDER CONFIGURATION (RECOMMENDED)
+• Enhanced for holding profitable positions longer
+• Progressive profit milestone bonuses (1%, 2%, 5%, 10%)
+• Reduced cost penalties to encourage position holding
+• Pattern completion and momentum continuation rewards
+• Patient inactivity penalties (starts after 30 steps)
+
+� MAX_PROFIT CONFIGURATION (AGGRESSIVE)
+• Maximum profit capture with very aggressive trend riding
+• Highest position hold bonuses and minimal cost penalties
+• Extended holding periods (up to 36 hours equivalent)
+• Maximum profit milestone bonuses
+• For experienced traders seeking maximum returns
+
+🏛️ DEFAULT CONFIGURATION
+• Conservative baseline approach
+• Standard risk management
+• No enhanced profit capture features
+• Suitable for initial testing and conservative trading
+
+🎯 KEY FEATURES IN ENHANCED CONFIGS
+✅ Progressive profit milestone bonuses
+✅ Enhanced trend following rewards  
+✅ Pattern completion bonuses
+✅ Momentum continuation rewards
+✅ Position context-aware penalties
+✅ Reduced overtrading penalties
+    """
+    
+    console.print(Panel(config_details, title="Configuration Details", border_style="blue"))
+    console.print("\n[dim]Press Enter to continue...[/dim]")
+    input()
+
 def check_data_availability():
     """Check if data files are available"""
     data_dir = Path("data")
@@ -102,10 +211,20 @@ def check_data_availability():
     return True
 
 def train_new_model():
-    """Launch new model training"""
+    """Launch new model training with reward configuration selection"""
     console.print("[bold]🎯 Training New Model[/bold]")
     
+    # First select reward configuration
+    reward_config = select_reward_configuration()
+    
     try:
+        from train_model import main as train_main
+        # Pass the reward configuration to the training function
+        train_main(reward_config=reward_config)
+    except TypeError:
+        # Fallback for older train_main that doesn't accept reward_config
+        console.print("[yellow]⚠️  Training module doesn't support reward_config parameter[/yellow]")
+        console.print("[yellow]Using default configuration for now...[/yellow]")
         from train_model import main as train_main
         train_main()
     except ImportError as e:
@@ -114,10 +233,20 @@ def train_new_model():
         console.print(f"[red]❌ Training error: {str(e)}[/red]")
 
 def multi_episode_training():
-    """Launch multi-episode training"""
+    """Launch multi-episode training with reward configuration selection"""
     console.print("[bold]🔄 Multi-Episode Training[/bold]")
     
+    # First select reward configuration
+    reward_config = select_reward_configuration()
+    
     try:
+        from multi_episode_training import setup_multi_episode_training
+        # Pass the reward configuration to the multi-episode training function
+        setup_multi_episode_training(reward_config=reward_config)
+    except TypeError:
+        # Fallback for older function that doesn't accept reward_config
+        console.print("[yellow]⚠️  Multi-episode training module doesn't support reward_config parameter[/yellow]")
+        console.print("[yellow]Using default configuration for now...[/yellow]")
         from multi_episode_training import setup_multi_episode_training
         setup_multi_episode_training()
     except ImportError as e:
@@ -344,6 +473,120 @@ def analyze_data_quality():
     except Exception as e:
         console.print(f"[red]❌ Analysis failed: {str(e)}[/red]")
 
+def analyze_episode_performance():
+    """Analyze performance of a specific episode and generate markdown report"""
+    console.print("[bold]📈 Analyze Episode Performance[/bold]")
+    
+    try:
+        from multi_episode_training import EpisodeTracker
+        import pandas as pd
+        import numpy as np
+        from datetime import datetime
+        
+        # Load episode tracker
+        tracker = EpisodeTracker()
+        
+        # Get available episodes
+        episodes_dir = Path("episodes")
+        if not episodes_dir.exists():
+            console.print("[red]❌ No episodes directory found[/red]")
+            return
+        
+        # Find all episode directories
+        episode_dirs = [d for d in episodes_dir.iterdir() if d.is_dir()]
+        
+        if not episode_dirs:
+            console.print("[red]❌ No episodes found[/red]")
+            return
+        
+        # Display available episodes
+        episode_table = Table(title="Available Episodes for Analysis")
+        episode_table.add_column("Index", style="cyan", width=4)
+        episode_table.add_column("Episode", style="green")
+        episode_table.add_column("Date", style="yellow")
+        episode_table.add_column("Log Files", style="blue")
+        episode_table.add_column("Models", style="magenta")
+        
+        episode_info = []
+        for i, episode_dir in enumerate(sorted(episode_dirs)):
+            # Get basic info
+            episode_name = episode_dir.name
+            date_part = episode_name.split('_')[-2:]  # Extract date and time
+            display_date = f"{date_part[0]} {date_part[1]}" if len(date_part) >= 2 else "Unknown"
+            
+            # Count log files
+            logs_dir = episode_dir / "logs"
+            log_count = len(list(logs_dir.glob("*.csv"))) if logs_dir.exists() else 0
+            
+            # Count models
+            models_dir = episode_dir / "models"
+            model_count = len(list(models_dir.glob("*.zip"))) if models_dir.exists() else 0
+            
+            episode_table.add_row(
+                str(i + 1),
+                episode_name,
+                display_date,
+                str(log_count),
+                str(model_count)
+            )
+            
+            episode_info.append({
+                'dir': episode_dir,
+                'name': episode_name,
+                'logs_dir': logs_dir,
+                'models_dir': models_dir,
+                'log_count': log_count,
+                'model_count': model_count
+            })
+        
+        console.print(episode_table)
+        
+        # Let user select episode
+        choice = IntPrompt.ask("Select episode to analyze", default=1)
+        
+        if choice < 1 or choice > len(episode_info):
+            console.print("[red]❌ Invalid selection[/red]")
+            return
+        
+        selected_episode = episode_info[choice - 1]
+        console.print(f"\n[bold]📊 Analyzing: {selected_episode['name']}[/bold]")
+        
+        # Generate comprehensive analysis
+        report = generate_episode_report(selected_episode, tracker)
+        
+        if report:
+            # Save report as markdown file
+            reports_dir = Path("reports")
+            reports_dir.mkdir(exist_ok=True)
+            
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            report_filename = f"episode_analysis_{selected_episode['name']}_{timestamp}.md"
+            report_path = reports_dir / report_filename
+            
+            with open(report_path, 'w', encoding='utf-8') as f:
+                f.write(report)
+            
+            console.print(f"\n[bold green]✅ Analysis complete![/bold green]")
+            console.print(f"📄 Report saved to: [green]{report_path}[/green]")
+            
+            # Ask if user wants to view the report
+            view_report = Prompt.ask("View report now? (y/n)", default="y")
+            if view_report.lower() in ['y', 'yes']:
+                console.print("\n" + "="*80)
+                console.print(report)
+                console.print("="*80)
+        
+    except ImportError as e:
+        console.print(f"[red]❌ Error importing required modules: {str(e)}[/red]")
+    except Exception as e:
+        console.print(f"[red]❌ Analysis error: {str(e)}[/red]")
+
+def generate_episode_report(episode_info: dict, tracker) -> str:
+    """Generate comprehensive markdown report for an episode with sub-episode analysis"""
+    # Import the fixed function
+    from fixed_analysis import generate_episode_report_fixed
+    return generate_episode_report_fixed(episode_info, tracker)
+
 def view_training_history():
     """View training history and models"""
     console.print("[bold]📋 Training History[/bold]")
@@ -425,6 +668,180 @@ def show_help():
     """
     
     console.print(Panel(help_text, title="Help & Documentation", border_style="blue"))
+
+def trade_anomaly_analysis():
+    """Analyze trade anomalies for a selected episode"""
+    console.print("[bold]🚨 Trade Anomaly Analysis[/bold]")
+    
+    try:
+        # Get available episodes
+        episodes_dir = Path("episodes")
+        if not episodes_dir.exists():
+            console.print("[red]❌ No episodes directory found[/red]")
+            return
+        
+        # Find all episode directories
+        episode_dirs = [d for d in episodes_dir.iterdir() if d.is_dir()]
+        
+        if not episode_dirs:
+            console.print("[red]❌ No episodes found[/red]")
+            return
+        
+        # Display available episodes
+        episode_table = Table(title="Available Episodes for Trade Anomaly Analysis")
+        episode_table.add_column("Index", style="cyan", width=4)
+        episode_table.add_column("Episode", style="green")
+        episode_table.add_column("Date", style="yellow")
+        episode_table.add_column("Trade Files", style="blue")
+        
+        episode_info = []
+        for i, episode_dir in enumerate(sorted(episode_dirs)):
+            # Get basic info
+            episode_name = episode_dir.name
+            date_part = episode_name.split('_')[-2:]  # Extract date and time
+            display_date = f"{date_part[0]} {date_part[1]}" if len(date_part) >= 2 else "Unknown"
+            
+            # Count trade log files (CSV files in logs directory)
+            logs_dir = episode_dir / "logs"
+            trade_files = list(logs_dir.glob("*.csv")) if logs_dir.exists() else []
+            trade_count = len(trade_files)
+            
+            episode_table.add_row(
+                str(i + 1),
+                episode_name,
+                display_date,
+                str(trade_count)
+            )
+            
+            episode_info.append({
+                'dir': episode_dir,
+                'name': episode_name,
+                'logs_dir': logs_dir,
+                'trade_files': trade_files,
+                'trade_count': trade_count
+            })
+        
+        console.print(episode_table)
+        
+        # Let user select episode
+        choice = IntPrompt.ask("Select episode to analyze for trade anomalies", default=1)
+        
+        if choice < 1 or choice > len(episode_info):
+            console.print("[red]❌ Invalid selection[/red]")
+            return
+        
+        selected_episode = episode_info[choice - 1]
+        console.print(f"\n[bold]🔍 Analyzing trade anomalies for: {selected_episode['name']}[/bold]")
+        
+        if selected_episode['trade_count'] == 0:
+            console.print("[red]❌ No trade files found for this episode[/red]")
+            return
+        
+        # Load market data (same data used for training)
+        data_dir = Path("data")
+        csv_files = list(data_dir.glob("*.csv"))
+        
+        if not csv_files:
+            console.print("[red]❌ No market data CSV files found in data directory[/red]")
+            return
+        
+        # For now, use the first CSV file found (could be enhanced to let user choose)
+        market_data_file = csv_files[0]
+        console.print(f"📊 Using market data: {market_data_file.name}")
+        
+        # Initialize the trade anomaly analyzer with market data path
+        analyzer = TradeAnomalyAnalyzer(str(market_data_file))
+        
+        # Load market data once
+        analyzer.load_market_data()
+        
+        # Analyze each trade file
+        for trade_file in selected_episode['trade_files']:
+            console.print(f"\n🔍 Analyzing: {trade_file.name}")
+            
+            try:
+                # Load trade data for this file
+                analyzer.load_trade_data(str(trade_file))
+                
+                # Run the analysis (returns a dict with anomalies)
+                results = analyzer.analyze_trade_anomalies(tolerance_pct=1.0)
+                
+                # Extract anomalies from results
+                anomalies = results.get('anomalies', [])
+                
+                if anomalies:
+                    console.print(f"[red]⚠️  Found {len(anomalies)} trade anomalies![/red]")
+                    
+                    # Display summary of anomalies
+                    anomaly_table = Table(title=f"Anomalies in {trade_file.name}")
+                    anomaly_table.add_column("Type", style="red")
+                    anomaly_table.add_column("Trade Time", style="yellow")
+                    anomaly_table.add_column("Price Difference", style="magenta")
+                    anomaly_table.add_column("Details", style="cyan")
+                    
+                    for anomaly in anomalies[:10]:  # Show first 10
+                        anomaly_table.add_row(
+                            anomaly.get('type', 'Unknown'),
+                            str(anomaly.get('trade_time', 'N/A')),
+                            f"{anomaly.get('price_difference', 0):.6f}",
+                            str(anomaly.get('message', 'No details'))[:50]
+                        )
+                    
+                    console.print(anomaly_table)
+                    
+                    if len(anomalies) > 10:
+                        console.print(f"[yellow]... and {len(anomalies) - 10} more anomalies[/yellow]")
+                        
+                    # Generate detailed report and visualizations
+                    # Create output directory under the episode folder
+                    episode_reports_dir = selected_episode['dir'] / "anomaly_reports"
+                    episode_reports_dir.mkdir(exist_ok=True)
+                    
+                    console.print(f"\n📄 Generating detailed report...")
+                    report_file = analyzer.generate_report(
+                        output_dir=str(episode_reports_dir),
+                        trade_file_path=str(trade_file)
+                    )
+                    console.print(f"[green]✅ Report saved to: {report_file}[/green]")
+                    
+                    console.print(f"📊 Creating visualizations...")
+                    analyzer.create_visualizations(output_dir=str(episode_reports_dir))
+                    console.print(f"[green]✅ Charts saved to: {episode_reports_dir}[/green]")
+                    
+                else:
+                    console.print(f"[green]✅ No anomalies found in {trade_file.name}[/green]")
+                    
+            except Exception as file_error:
+                console.print(f"[red]❌ Error analyzing {trade_file.name}: {str(file_error)}[/red]")
+        
+        console.print(f"\n[bold green]✅ Trade anomaly analysis complete for {selected_episode['name']}![/bold green]")
+        
+        # Show where reports were saved
+        episode_reports_dir = selected_episode['dir'] / "anomaly_reports"
+        if episode_reports_dir.exists():
+            console.print(f"[cyan]📁 Analysis files saved to:[/cyan]")
+            console.print(f"   {episode_reports_dir}")
+            
+            # List the files created
+            report_files = list(episode_reports_dir.glob("*.txt"))
+            chart_files = list(episode_reports_dir.glob("*.png"))
+            
+            if report_files:
+                console.print(f"[green]📄 Reports ({len(report_files)}):[/green]")
+                for report_file in report_files:
+                    console.print(f"   - {report_file.name}")
+            
+            if chart_files:
+                console.print(f"[green]📊 Charts ({len(chart_files)}):[/green]")
+                for chart_file in chart_files:
+                    console.print(f"   - {chart_file.name}")
+        
+        console.print("[yellow]💡 Tip: Review the detailed reports and charts to understand price anomalies[/yellow]")
+        
+    except Exception as e:
+        console.print(f"[red]❌ Trade anomaly analysis error: {str(e)}[/red]")
+        import traceback
+        console.print(f"[red]Debug info: {traceback.format_exc()}[/red]")
 
 def archive_data_analysis_subfolders():
     """Archive DATA_ANALYSIS subfolders to keep only source code"""
@@ -722,7 +1139,7 @@ def main():
             if not data_available:
                 console.print("[yellow]⚠️  No data files found. Consider using option 5 to download data.[/yellow]")
             
-            choice = IntPrompt.ask("Select an option", default=9)
+            choice = IntPrompt.ask("Select an option", default=10)
             
             if choice == 1:
                 if not data_available:
@@ -744,10 +1161,16 @@ def main():
             elif choice == 6:
                 view_training_history()
             elif choice == 7:
-                archive_logs_menu()
+                analyze_episode_performance()
             elif choice == 8:
-                show_help()
+                trade_anomaly_analysis()
             elif choice == 9:
+                show_help()
+            elif choice == 10:
+                trade_anomaly_analysis()
+            elif choice == 11:
+                archive_logs_menu()
+            elif choice == 12:
                 console.print("[bold green]👋 Thank you for using the Trading Bot![/bold green]")
                 console.print("[yellow]⚠️  Remember: Trading involves risk. Trade responsibly![/yellow]")
                 break
@@ -755,7 +1178,7 @@ def main():
                 console.print("[red]❌ Invalid option. Please try again.[/red]")
             
             # Pause before showing menu again
-            if choice != 9:
+            if choice != 10:
                 console.print("\n[dim]Press Enter to continue...[/dim]")
                 input()
                 os.system('cls' if os.name == 'nt' else 'clear')
