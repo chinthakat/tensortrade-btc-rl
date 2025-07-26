@@ -26,12 +26,50 @@ except ImportError:
 try:
     import pandas_ta as ta
 except ImportError:
-    raise ImportError("pandas_ta is required but not installed. Please install with: pip install pandas_ta")
+    try:
+        # Try installing compatible version if import fails
+        import subprocess
+        import sys
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "pandas_ta==0.3.14b0"])
+        import pandas_ta as ta
+    except:
+        raise ImportError("pandas_ta is required but not installed. Please install with: pip install pandas_ta==0.3.14b0")
+except Exception as e:
+    # Handle numpy compatibility issues
+    import warnings
+    warnings.warn(f"pandas_ta import warning: {e}. Using fallback indicators.")
+    # Use fallback technical analysis if pandas_ta fails
+    ta = None
 
 warnings.filterwarnings("ignore")
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# Create separate logger for penalty errors - logs to file only
+penalty_logger = logging.getLogger('penalty_errors')
+penalty_logger.setLevel(logging.ERROR)
+penalty_logger.propagate = False  # Don't propagate to root logger (terminal)
+
+# Create file handler for penalty errors
+os.makedirs('logs', exist_ok=True)
+penalty_file_handler = logging.FileHandler('logs/penalty_errors.log', mode='a')
+penalty_file_handler.setLevel(logging.ERROR)
+penalty_file_formatter = logging.Formatter('%(asctime)s - PENALTY - %(message)s')
+penalty_file_handler.setFormatter(penalty_file_formatter)
+penalty_logger.addHandler(penalty_file_handler)
+
+# Create separate logger for episode maintenance - logs to file only
+episode_logger = logging.getLogger('episode_maintenance')
+episode_logger.setLevel(logging.INFO)
+episode_logger.propagate = False  # Don't propagate to root logger (terminal)
+
+# Create file handler for episode maintenance
+episode_file_handler = logging.FileHandler('logs/episode_maintenance.log', mode='a')
+episode_file_handler.setLevel(logging.INFO)
+episode_file_formatter = logging.Formatter('%(asctime)s - EPISODE - %(message)s')
+episode_file_handler.setFormatter(episode_file_formatter)
+episode_logger.addHandler(episode_file_handler)
 
 class TradingMetrics:
     """Calculate trading performance metrics"""
@@ -260,7 +298,7 @@ class FuturesTradingEnv(gym.Env):
         maker_fee: float = 0.0002,  # 0.02%
         taker_fee: float = 0.0004,  # 0.04%
         funding_rate: float = 0.0001,  # 0.01% per 8 hours
-        window_size: int = 60,
+        window_size: int = 60,  # IMPROVED: Increased from 20 to 60 to align with indicator buffer requirements
         stop_loss_pct: float = 0.02,  # 2% - fallback for fixed mode
         take_profit_pct: float = 0.04,  # 4% - fallback for fixed mode
         # Dynamic Stop-Loss and Take-Profit Configuration
@@ -271,6 +309,8 @@ class FuturesTradingEnv(gym.Env):
         max_stop_loss_pct: float = 0.08,  # 8% maximum stop-loss
         min_take_profit_pct: float = 0.01,  # 1% minimum take-profit
         max_take_profit_pct: float = 0.15,  # 15% maximum take-profit
+        # Risk Management Configuration
+        max_risk_per_trade: float = 0.02,  # CONFIGURABLE: Maximum 2% risk per trade (was hardcoded)
         log_file: str = None,
         training_iteration: int = 0,
         training_split_ratio: float = 0.7,  # Use 70% of data for scaler fitting
@@ -306,6 +346,9 @@ class FuturesTradingEnv(gym.Env):
         self.training_iteration = training_iteration
         self.training_split_ratio = training_split_ratio
         self.training_end_idx = training_end_idx
+        
+        # Risk management configuration
+        self.max_risk_per_trade = max_risk_per_trade  # Store configurable risk parameter
         
         # Liquidation parameters
         self.maintenance_margin_rate = maintenance_margin_rate
@@ -377,7 +420,7 @@ class FuturesTradingEnv(gym.Env):
             'portfolio_features': spaces.Box(
                 low=-np.inf, 
                 high=np.inf, 
-                shape=(12,),  # Enhanced portfolio state
+                shape=(9,),  # Enhanced to 9 features (added PnL trend)
                 dtype=np.float32
             )
         })
@@ -460,6 +503,69 @@ class FuturesTradingEnv(gym.Env):
         df['macd_signal'] = macd['MACDs_12_26_9']
         df['macd_histogram'] = macd['MACDh_12_26_9']
         
+        # Additional Directional Indicators
+        
+        # 1. ADX (Average Directional Index) - Trend Strength
+        adx_result = ta.adx(df['high'], df['low'], df['close'], length=14)
+        if adx_result is not None and isinstance(adx_result, pd.DataFrame):
+            df['adx'] = adx_result['ADX_14']  # Trend strength (>25 = strong trend)
+            df['di_plus'] = adx_result['DMP_14']  # Positive directional indicator
+            df['di_minus'] = adx_result['DMN_14']  # Negative directional indicator
+            # Directional bias: +1 for bullish, -1 for bearish, 0 for neutral
+            df['directional_bias'] = np.where(df['di_plus'] > df['di_minus'], 1, 
+                                            np.where(df['di_minus'] > df['di_plus'], -1, 0))
+        
+        # 2. Parabolic SAR - Trend Direction and Stop Loss
+        psar_result = ta.psar(df['high'], df['low'], df['close'])
+        if psar_result is not None and isinstance(psar_result, pd.DataFrame):
+            # PSAR columns vary, check available columns
+            psar_cols = [col for col in psar_result.columns if 'PSAR' in col]
+            if psar_cols:
+                df['psar'] = psar_result[psar_cols[0]]
+                # Trend direction: 1 if price above PSAR (bullish), -1 if below (bearish)
+                df['psar_trend'] = np.where(df['close'] > df['psar'], 1, -1)
+        
+        # 3. Williams %R - Momentum Oscillator
+        willr_result = ta.willr(df['high'], df['low'], df['close'], length=14)
+        if willr_result is not None:
+            df['williams_r'] = willr_result
+            # Directional signals: > -20 overbought (bearish), < -80 oversold (bullish)
+            df['williams_signal'] = np.where(df['williams_r'] > -20, -1,
+                                           np.where(df['williams_r'] < -80, 1, 0))
+        
+        # 4. CCI (Commodity Channel Index) - Momentum
+        cci_result = ta.cci(df['high'], df['low'], df['close'], length=20)
+        if cci_result is not None:
+            df['cci'] = cci_result
+            # CCI signals: > 100 bullish, < -100 bearish
+            df['cci_signal'] = np.where(df['cci'] > 100, 1,
+                                      np.where(df['cci'] < -100, -1, 0))
+        
+        # 5. Moving Average Cross Signals
+        df['ma_cross_signal'] = np.where(df['ema_10'] > df['ema_20'], 1,
+                                       np.where(df['ema_10'] < df['ema_20'], -1, 0))
+        
+        # 6. MACD Signal Line Cross
+        df['macd_cross_signal'] = np.where(df['macd'] > df['macd_signal'], 1,
+                                         np.where(df['macd'] < df['macd_signal'], -1, 0))
+        
+        # 7. Multi-timeframe trend strength
+        # Short-term trend (5-period)
+        df['trend_5'] = np.where(df['close'] > df['close'].shift(5), 1, -1)
+        # Medium-term trend (10-period) 
+        df['trend_10'] = np.where(df['close'] > df['close'].shift(10), 1, -1)
+        # Long-term trend (20-period)
+        df['trend_20'] = np.where(df['close'] > df['close'].shift(20), 1, -1)
+        
+        # 8. Composite Directional Score (-3 to +3)
+        df['composite_direction'] = (
+            df.get('directional_bias', 0) +
+            df.get('psar_trend', 0) + 
+            df.get('ma_cross_signal', 0) +
+            df.get('macd_cross_signal', 0) +
+            np.where(df['rsi'] > 70, -1, np.where(df['rsi'] < 30, 1, 0))
+        ).fillna(0)
+        
         # Volume indicators
         volume_sma = ta.sma(df['volume'], length=20)
         if volume_sma is None:
@@ -505,6 +611,30 @@ class FuturesTradingEnv(gym.Env):
             if col in df.columns:
                 df[col] = df[col].fillna(0)
         
+        # For directional indicators, fill with neutral values
+        directional_cols = {
+            'adx': 0,  # No trend
+            'di_plus': 0, 'di_minus': 0,
+            'directional_bias': 0,  # Neutral
+            'psar': df['close'],  # Use current price if missing
+            'psar_trend': 0,  # Neutral
+            'williams_r': -50,  # Neutral Williams %R
+            'williams_signal': 0,  # No signal
+            'cci': 0,  # Neutral CCI
+            'cci_signal': 0,  # No signal
+            'ma_cross_signal': 0,  # No cross
+            'macd_cross_signal': 0,  # No cross
+            'trend_5': 0, 'trend_10': 0, 'trend_20': 0,  # Neutral trends
+            'composite_direction': 0  # Neutral composite
+        }
+        
+        for col, fill_value in directional_cols.items():
+            if col in df.columns:
+                if col == 'psar':
+                    df[col] = df[col].fillna(df['close'])
+                else:
+                    df[col] = df[col].fillna(fill_value)
+        
         # For volume ratio, fill with 1 (average volume)
         if 'volume_ratio' in df.columns:
             df['volume_ratio'] = df['volume_ratio'].fillna(1.0)
@@ -518,15 +648,37 @@ class FuturesTradingEnv(gym.Env):
         if df.shape[0] != original_shape[0]:
             logging.warning(f"Unexpected data loss: {original_shape[0] - df.shape[0]} rows lost during processing")
         else:
-            logging.info("✅ Data alignment preserved - no rows lost during preprocessing")
+            logging.info("SUCCESS: Data alignment preserved - no rows lost during preprocessing")
         
-        # Select feature columns
+        # Select feature columns (SIMPLIFIED 8-CORE MINIMAL SET)
+        # This reduces features from 27 to 8 (70% reduction) to solve overtrading
         feature_cols = [
-            'returns', 'log_returns', 'high_low_pct', 'close_open_pct',
-            'sma_10', 'sma_20', 'ema_10', 'ema_20', 'rsi', 'stoch_k',
-            'bb_width', 'atr', 'macd', 'macd_signal', 'macd_histogram',
-            'volume_ratio', 'price_position'
+            # Core price momentum (most important)
+            'returns',          # Price percentage change
+            
+            # Essential momentum indicators  
+            'rsi',             # 14-period RSI (overbought/oversold)
+            
+            # Essential trend indicators
+            'ema_10',          # Short-term trend (10-period EMA)
+            'ema_20',          # Medium-term trend (20-period EMA)
+            
+            # Essential momentum oscillator
+            'macd',            # MACD line (momentum)
+            
+            # Essential trend strength
+            'adx',             # Average Directional Index (trend strength)
+            
+            # Essential volatility
+            'atr',             # Average True Range (volatility measure)
+            
+            # Essential volume context
+            'volume_ratio'     # Volume relative to average
         ]
+        
+        logging.info("TARGET: USING SIMPLIFIED 8-CORE INDICATOR SET")
+        logging.info("REDUCED: Reduced from 27 to 8 indicators (70% reduction)")
+        logging.info("BOOST: This should eliminate overtrading behavior")
         
         # Check which feature columns are available
         available_cols = [col for col in feature_cols if col in df.columns]
@@ -572,8 +724,14 @@ class FuturesTradingEnv(gym.Env):
         super().reset(seed=seed)
         
         # Calculate safe starting point - ensure technical indicators are stable
-        # Use max of window_size and a minimum buffer for technical indicators
-        min_buffer_for_indicators = max(60, self.window_size)  # At least 60 steps for indicators to stabilize
+        # IMPROVED: Use window_size consistently to avoid padded data at episode start
+        # Technical indicators need time to stabilize, so we ensure minimum buffer equals window_size
+        min_buffer_for_indicators = max(self.window_size, 60)  # Use the larger of window_size or 60 for stability
+        
+        # CONSISTENCY FIX: If window_size < 60, we should increase it rather than start with padded data
+        if self.window_size < min_buffer_for_indicators:
+            episode_logger.warning(f"Window size ({self.window_size}) is smaller than minimum buffer ({min_buffer_for_indicators}). "
+                                 f"This may cause padded observations at episode start.")
         
         # Trading state
         self.current_step = min_buffer_for_indicators
@@ -582,6 +740,8 @@ class FuturesTradingEnv(gym.Env):
         self.position_size = 0.0  # In base currency (BTC)
         self.position_side = 0  # 1 for long, -1 for short, 0 for flat
         self.entry_price = 0.0
+        self.trade_entry_price = 0.0  # Store original entry price for trade logging consistency
+        self.entry_equity = 0.0  # Store equity at trade entry for consistent net worth tracking
         self.margin_used = 0.0
         self.unrealized_pnl = 0.0
         self.leverage = 0.0
@@ -596,13 +756,18 @@ class FuturesTradingEnv(gym.Env):
         
         # Trade tracking
         self.trade_id = 0
+        self.episode_id = getattr(self, 'episode_id', 0) + 1  # Increment episode ID on each reset
         self.trade_start_step = None
+        self.trade_entry_datetime = None  # Store original entry datetime for consistent logging
         self.entry_equity = 0.0
         self.total_fees = 0.0
         self.total_funding_costs = 0.0
         
         # Reward tracking for trades
         self.current_trade_reward = 0.0
+        
+        # PnL-aware reward system
+        self.unrealized_pnl_history = []  # Track PnL trend for intelligent rewards
         
         # Performance tracking
         self.equity_history = deque(maxlen=1000)
@@ -637,11 +802,27 @@ class FuturesTradingEnv(gym.Env):
         # Episode statistics
         self.episode_trades = 0
         self.episode_profit = 0.0
+        self.episode_total_fees = 0.0  # Track total fees per episode
+        
+        # Initialize penalty tracking variables
+        self.dust_position_penalty = 0.0
+        self.phantom_trade_penalty = 0.0
+        self.invalid_entry_penalty = 0.0
+        self.zero_pnl_detection_penalty = 0.0
+        self.zero_pnl_close_penalty = 0.0
+        self.excessive_modification_penalty = 0.0
+        self.fee_cap_penalty = 0.0
+        self.entry_price_fallback_penalty = 0.0
+        self.critical_trade_block_penalty = 0.0
         
         observation = self._get_observation()
         info = self._get_info()
         
         return observation, info
+    
+    def _get_unique_trade_id(self):
+        """Generate a unique trade ID that includes episode information"""
+        return f"EP{self.episode_id:03d}_TRADE_{self.trade_id:05d}"
     
     def step(self, action) -> Tuple[Dict, float, bool, bool, Dict]:
         """Execute one step in the environment"""
@@ -696,6 +877,23 @@ class FuturesTradingEnv(gym.Env):
                     leverage = leverage[0]
             else:
                 leverage = action[0] if isinstance(action, (list, np.ndarray)) else action
+            
+            # PENALTY FOR EXTREME LEVERAGE REQUESTS - penalize before clipping
+            original_leverage = float(leverage)
+            extreme_leverage_penalty = 0.0
+            
+            if abs(original_leverage) > self.max_leverage:
+                leverage_excess = abs(original_leverage) / self.max_leverage - 1.0
+                extreme_leverage_penalty = min(leverage_excess * 0.2, 1.0)  # Up to -1.0 penalty
+                # Silent penalty - only log at debug level since penalty is applied
+                logging.debug(f"EXTREME_LEVERAGE_PENALTY: Requested {original_leverage:.1f}x > {self.max_leverage}x limit")
+                logging.debug(f"LEVERAGE_EXCESS_PENALTY: -{extreme_leverage_penalty:.4f} for {leverage_excess*100:.1f}% excess")
+            
+            # Store penalty for reward calculation
+            if not hasattr(self, 'extreme_leverage_penalty'):
+                self.extreme_leverage_penalty = 0.0
+            self.extreme_leverage_penalty = extreme_leverage_penalty
+            
             leverage = float(np.clip(leverage, -self.max_leverage, self.max_leverage))
             
             # Apply trading threshold - treat small leverage as HOLD
@@ -714,35 +912,6 @@ class FuturesTradingEnv(gym.Env):
         if action_type in self.action_type_counts:
             self.action_type_counts[action_type] += 1
         
-        # Log action statistics periodically
-        if hasattr(self, 'logger') and self.logger and self.current_step % self.action_log_interval == 0:
-            total_actions = sum(self.action_type_counts.values())
-            if total_actions > 0:
-                action_stats = {
-                    'trade_id': f"ACTION_STATS_{self.current_step}",
-                    'training_step': self.current_step,
-                    'training_iteration': getattr(self, 'training_iteration', 0),
-                    'entry_datetime': self._safe_get_df_data(self.current_step, 'timestamp', f"step_{self.current_step}"),
-                    'close_datetime': '',
-                    'side': f"HOLD:{self.action_type_counts['HOLD']}/{total_actions}",
-                    'entry_action': f"BUY:{self.action_type_counts['BUY']} SELL:{self.action_type_counts['SELL']} CANCEL:{self.action_type_counts['CANCEL']}",
-                    'entry_price': 0,
-                    'close_price': '',
-                    'net_pnl': 0,
-                    'close_reward': 0,
-                    'entry_net_worth': self.equity,
-                    'close_net_worth': self.equity,
-                    'trade_duration_hours': 0,
-                    'status': f"Total actions: {total_actions}",
-                    'win_loss': 'ACTION_SUMMARY',
-                    'position_size': 0,
-                    'fees_paid': 0,
-                    'stop_loss_price': '',
-                    'take_profit_price': '',
-                    'close_reason': f"HOLD:{self.action_type_counts['HOLD']/total_actions:.1%}"
-                }
-                self.logger.log_trade(action_stats)
-        
         # Update action streaks
         if action_type == "HOLD":
             self.hold_streak += 1
@@ -754,38 +923,59 @@ class FuturesTradingEnv(gym.Env):
         # Store previous state
         prev_equity = self.equity
         
-        # Check if we can safely move to next step
+        # EPISODE TERMINATION FIX: Check episode boundary BEFORE any trading actions
         next_step = self.current_step + 1
-        if next_step >= len(self.price_data):
-            # We're at the end of data, use current step prices
+        
+        # If we're at or near the end of data, force episode termination
+        if next_step >= len(self.price_data) - 1:
+            # FORCE EPISODE TERMINATION to prevent infinite loop at boundary
             current_price = self._safe_get_price_data(self.current_step, 'close')
-            current_high = self._safe_get_price_data(self.current_step, 'high', current_price)
-            current_low = self._safe_get_price_data(self.current_step, 'low', current_price)
-        else:
-            # Safe to move to next step - this ensures correct timestep for trade execution
-            self.current_step = next_step
-            current_price = self._safe_get_price_data(self.current_step, 'close')
-            current_high = self._safe_get_price_data(self.current_step, 'high', current_price)
-            current_low = self._safe_get_price_data(self.current_step, 'low', current_price)
+            
+            # Close any open position WITHOUT charging fees (episode cleanup)
+            if self.position_size != 0:
+                self._force_close_position_no_fees(current_price, "EPISODE_END")
+            
+            # Return terminal state immediately - NO MORE TRADING ALLOWED
+            terminated = True
+            truncated = True
+            
+            # Create terminal observation
+            observation = {
+                'market_features': np.zeros((self.window_size, len(self.feature_columns.columns)), dtype=np.float32),
+                'portfolio_features': np.zeros(9, dtype=np.float32)
+            }
+            
+            # Final reward calculation
+            reward = self._calculate_enhanced_reward(prev_equity)
+            info = self._get_info()
+            
+            logging.info(f"EPISODE_TERMINATED at step {self.current_step}: No more trading allowed at episode boundary")
+            return observation, reward, terminated, truncated, info
+        
+        # Safe to continue - move to next step for trading
+        self.current_step = next_step
+        current_price = self._safe_get_price_data(self.current_step, 'close')
+        current_high = self._safe_get_price_data(self.current_step, 'high', current_price)
+        current_low = self._safe_get_price_data(self.current_step, 'low', current_price)
         
         # Validate that current_price is not zero (CRITICAL FIX)
         if current_price <= 0:
             logging.error(f"ZERO_PRICE_DETECTED in step(): current_price={current_price} at step {self.current_step}")
             # Get a valid price from the last available data
             current_price = self._safe_get_price_data(self.current_step, 'close')
-            logging.info(f"PRICE_CORRECTED in step(): Using price={current_price} instead")
+            episode_logger.info(f"PRICE_CORRECTED in step(): Using price={current_price} instead")
             # Also fix current_high and current_low if they're invalid
             if current_high <= 0:
                 current_high = current_price
             if current_low <= 0:
                 current_low = current_price
         
-        # Update unrealized PnL
+        # Update unrealized PnL - FIXED: Use abs(position_size) for correct short position calculations
         if self.position_size != 0:
             if self.position_side == 1:  # Long
-                self.unrealized_pnl = self.position_size * (current_price - self.entry_price)
+                self.unrealized_pnl = abs(self.position_size) * (current_price - self.entry_price)
             else:  # Short
-                self.unrealized_pnl = self.position_size * (self.entry_price - current_price)
+                self.unrealized_pnl = abs(self.position_size) * (self.entry_price - current_price)
         else:
             self.unrealized_pnl = 0.0
         
@@ -804,8 +994,67 @@ class FuturesTradingEnv(gym.Env):
                 # Do nothing - just hold current position
                 pass
             elif action_type == "CANCEL":
-                # Close current position
-                self._close_position(current_price, "CANCEL_ACTION")
+                # CANCEL should close any open position and log the closure
+                if self.position_size != 0:
+                    # Get current price for logging
+                    current_price = self._safe_get_price_data(self.current_step, 'close')
+                    
+                    # Calculate PnL for the cancelled position - FIXED: Use abs(position_size) for correct short calculations
+                    if self.position_side == 1:  # Long
+                        pnl = abs(self.position_size) * (current_price - self.entry_price)
+                    else:  # Short
+                        pnl = abs(self.position_size) * (self.entry_price - current_price)
+                    
+                    # Update balance (minimal fees for CANCEL)
+                    cancel_fee = abs(self.position_size * current_price) * (self.taker_fee * 0.5)  # Reduced fee
+                    self.balance += pnl - cancel_fee
+                    self.total_fees += cancel_fee
+                    self.total_realized_pnl += pnl
+                    
+                    # Log the CANCEL closure
+                    if self.logger:
+                        cancel_duration_steps = self.current_step - (self.trade_start_step or self.current_step)
+                        cancel_duration_hours = cancel_duration_steps * 0.25  # 15min intervals
+                        
+                        trade_data = {
+                            'trade_id': self._get_unique_trade_id(),  # Same ID as open trade
+                            'training_step': self.current_step,
+                            'training_iteration': getattr(self, 'training_iteration', 0),
+                            'entry_datetime': self.trade_entry_datetime or self._safe_get_df_data(self.trade_start_step or self.current_step, 'timestamp', f"step_{self.trade_start_step or self.current_step}"),
+                            'close_datetime': self._safe_get_df_data(self.current_step, 'timestamp', f"step_{self.current_step}"),
+                            'side': 'FLAT',
+                            'entry_action': 'CANCEL_CLOSE',
+                            'entry_price': round(self.trade_entry_price or self.entry_price, 4),  # Use stored trade entry price
+                            'close_price': round(current_price, 4),
+                            'net_pnl': round(pnl, 6),
+                            'close_reward': 0,
+                            'entry_net_worth': getattr(self, 'entry_equity', self.equity),  # Use stored entry equity
+                            'close_net_worth': self.equity,
+                            'trade_duration_hours': cancel_duration_hours,
+                            'status': 'CLOSED',
+                            'win_loss': 'WIN' if pnl > 0 else 'LOSS' if pnl < 0 else 'NEUTRAL',
+                            'position_size': 0.0,  # Position is now closed
+                            'fees_paid': cancel_fee,
+                            'stop_loss_price': '',
+                            'take_profit_price': '',
+                            'close_reason': 'CANCEL_ACTION'
+                        }
+                        self.logger.log_trade(trade_data)
+                        
+                        episode_logger.info(f"CANCEL_CLOSE: Closed trade {self.trade_id:05d} via CANCEL action")
+                
+                # Reset position state
+                self.position_size = 0.0
+                self.position_side = 0
+                self.entry_price = 0.0
+                self.trade_entry_price = 0.0  # Reset trade entry price
+                self.margin_used = 0.0
+                self.unrealized_pnl = 0.0
+                self.stop_loss_price = None
+                self.take_profit_price = None
+                self.liquidation_price = None
+                self.trade_start_step = None
+                self.trade_entry_datetime = None  # Reset entry datetime when position closes
             else:
                 # Execute BUY/SELL action
                 self._execute_action(leverage, risk_percentage, current_price)
@@ -865,7 +1114,7 @@ class FuturesTradingEnv(gym.Env):
             # Return a dummy observation for terminal states
             observation = {
                 'market_features': np.zeros((self.window_size, len(self.feature_columns.columns)), dtype=np.float32),
-                'portfolio_features': np.zeros(12, dtype=np.float32)
+                'portfolio_features': np.zeros(9, dtype=np.float32)  # Updated to 9 features
             }
         
         info = self._get_info()
@@ -905,7 +1154,7 @@ class FuturesTradingEnv(gym.Env):
             logging.error(f"ZERO_PRICE_DETECTED: current_price={current_price} at step {self.current_step}")
             # Get a valid price from the last available data
             current_price = self._safe_get_price_data(self.current_step, 'close')
-            logging.info(f"PRICE_CORRECTED: Using price={current_price} instead")
+            episode_logger.info(f"PRICE_CORRECTED: Using price={current_price} instead")
         
         # Validate current price against market data
         market_price = self._safe_get_price_data(self.current_step, 'close')
@@ -922,36 +1171,15 @@ class FuturesTradingEnv(gym.Env):
         if not is_valid:
             logging.error(f"PRICE_VALIDATION_FAILED during trade execution: {validation_details}")
         
-        # Enhanced risk controls
-        max_risk_per_trade = 0.02  # Maximum 2% risk per trade
-        risk_percentage = min(risk_percentage, max_risk_per_trade)
+        # IMPROVED: Scale risk percentage to meaningful range instead of hard clamping
+        # This helps the agent learn more efficiently by mapping its output to actual useful values
+        # Use configurable max_risk_per_trade instead of hardcoded value
         
-        # Debug: Log action execution every 50 steps
-        if hasattr(self, 'logger') and self.logger and self.current_step % 50 == 0:
-            debug_action = {
-                'trade_id': f"ACTION_{self.current_step}",
-                'training_step': self.current_step,
-                'training_iteration': getattr(self, 'training_iteration', 0),
-                'entry_datetime': self.df.iloc[self.current_step]['timestamp'] if self.current_step < len(self.df) else f"step_{self.current_step}",
-                'close_datetime': '',
-                'side': f"ACTION_CALLED",
-                'entry_action': f"leverage: {target_leverage:.4f}, risk: {risk_percentage:.4f}",
-                'entry_price': current_price,
-                'close_price': '',
-                'net_pnl': 0,
-                'close_reward': 0,
-                'entry_net_worth': self.equity,
-                'close_net_worth': self.equity,
-                'trade_duration_hours': 0,
-                'status': f"equity: {self.equity:.2f}",
-                'win_loss': 'ACTION_DEBUG',
-                'position_size': self.position_size,
-                'fees_paid': 0,
-                'stop_loss_price': '',
-                'take_profit_price': '',
-                'close_reason': 'ACTION_ENTRY'
-            }
-            self.logger.log_trade(debug_action)
+        # Scale risk from agent's [0,1] output to [0, max_risk_per_trade] range
+        # This way, agent learns to use the full range meaningfully
+        if risk_percentage > 1.0:
+            risk_percentage = 1.0  # Cap at 100% if agent outputs higher
+        risk_percentage = risk_percentage * self.max_risk_per_trade  # Scale to 0-max_risk% range
         
         # Limit leverage based on current equity ratio
         equity_ratio = self.equity / self.initial_equity
@@ -967,43 +1195,112 @@ class FuturesTradingEnv(gym.Env):
         # Calculate position size based on risk percentage and leverage
         risk_equity = self.equity * risk_percentage  # Amount of equity to risk
         target_position_value = target_leverage * risk_equity
+        
+        # 🚨 CRITICAL FIX: Limit position value to prevent excessive fees
+        # Maximum position should never exceed available equity * max_leverage
+        max_safe_position_value = self.equity * min(abs(target_leverage), self.max_leverage)
+        
+        # Additional safety: Never allow position value > 50% of available equity at max leverage
+        absolute_max_position = self.equity * self.max_leverage * 0.5
+        max_safe_position_value = min(max_safe_position_value, absolute_max_position)
+        
+        # Apply the safety limit
+        safety_intervention_penalty = 0.0
+        if abs(target_position_value) > max_safe_position_value:
+            intervention_severity = abs(target_position_value) / max_safe_position_value - 1.0
+            safety_intervention_penalty += min(intervention_severity * 0.1, 0.5)  # Up to -0.5 penalty
+            logging.debug(f"POSITION_SIZE_LIMITED: Requested ${abs(target_position_value):.2f}, limited to ${max_safe_position_value:.2f}")
+            logging.debug(f"SAFETY_PENALTY: -{safety_intervention_penalty:.3f} for excessive position request")
+            target_position_value = np.sign(target_position_value) * max_safe_position_value
+        
         target_position_size = target_position_value / current_price if current_price > 0 else 0
         
-        # Additional safety: limit position size to reasonable fraction of equity
-        max_position_value = self.equity * abs(target_leverage) * 0.8  # 80% safety margin
-        if abs(target_position_value) > max_position_value:
-            target_position_value = np.sign(target_position_value) * max_position_value
-            target_position_size = target_position_value / current_price if current_price > 0 else 0
+        # 🚨 EMERGENCY BRAKE: Absolute position size limit (in BTC)
+        # Never allow more than equity/price worth of BTC to be traded
+        max_btc_position = (self.equity * self.max_leverage * 0.2) / current_price  # 20% of max theoretical
+        
+        # 🛑 ABSOLUTE EMERGENCY LIMIT: Never exceed $50,000 position value
+        absolute_max_position_value = 50000.0  # $50K absolute maximum
+        absolute_max_btc = absolute_max_position_value / current_price
+        max_btc_position = min(max_btc_position, absolute_max_btc)
+        
+        if abs(target_position_size) > max_btc_position:
+            btc_excess = abs(target_position_size) / max_btc_position - 1.0
+            safety_intervention_penalty += min(btc_excess * 0.2, 1.0)  # Up to -1.0 penalty for extreme BTC requests
+            penalty_logger.error(f"EMERGENCY_POSITION_BRAKE: Position {target_position_size:.6f} BTC > limit {max_btc_position:.6f} BTC at step {getattr(self, 'current_step', 'unknown')}")
+            penalty_logger.error(f"POSITION_VALUE: ${abs(target_position_size * current_price):.2f} > max ${max_btc_position * current_price:.2f}")
+            penalty_logger.error(f"SEVERE_SAFETY_PENALTY: -{min(btc_excess * 0.2, 1.0):.3f} for extreme BTC position")
+            logging.debug(f"EMERGENCY_POSITION_BRAKE: Position {target_position_size:.6f} BTC > limit {max_btc_position:.6f} BTC")
+            target_position_size = np.sign(target_position_size) * max_btc_position
         
         # Calculate trade size needed
         trade_size = target_position_size - self.position_size
         
-        # Debug logging to understand trading behavior
-        if hasattr(self, 'logger') and self.logger and self.current_step % 100 == 0:  # Log every 100 steps
-            debug_data = {
-                'trade_id': f"DEBUG_{self.current_step}",
-                'training_step': self.current_step,
-                'training_iteration': getattr(self, 'training_iteration', 0),
-                'entry_datetime': self.df.iloc[self.current_step]['timestamp'] if self.current_step < len(self.df) else f"step_{self.current_step}",
-                'close_datetime': '',
-                'side': f"target_leverage: {target_leverage:.4f}, risk_pct: {risk_percentage:.4f}",
-                'entry_action': f"target_pos: {target_position_size:.6f}, current_pos: {self.position_size:.6f}",
-                'entry_price': current_price,
-                'close_price': '',
-                'net_pnl': 0,
-                'close_reward': 0,
-                'entry_net_worth': self.equity,
-                'close_net_worth': self.equity,
-                'trade_duration_hours': 0,
-                'status': f"trade_size: {trade_size:.6f}",
-                'win_loss': 'SKIP' if abs(trade_size) <= 0.001 else 'EXECUTE',
-                'position_size': self.position_size,
-                'fees_paid': 0,
-                'stop_loss_price': '',
-                'take_profit_price': '',
-                'close_reason': 'DEBUG_INFO'
-            }
-            self.logger.log_trade(debug_data)
+        # 🚨 FINAL SAFETY CHECK: Prevent trades that would cause excessive fees
+        trade_value = abs(trade_size * current_price)
+        estimated_fee = trade_value * self.taker_fee
+        
+        # If fee would be > 1% of equity, reduce trade size
+        max_fee_allowed = self.equity * 0.01  # 1% of equity
+        if estimated_fee > max_fee_allowed:
+            reduction_factor = max_fee_allowed / estimated_fee
+            fee_excess = estimated_fee / max_fee_allowed - 1.0
+            safety_intervention_penalty += min(fee_excess * 0.05, 0.3)  # Up to -0.3 penalty for excessive fees
+            trade_size *= reduction_factor
+            target_position_size = self.position_size + trade_size
+            logging.debug(f"TRADE_SIZE_REDUCED: Fee would be ${estimated_fee:.2f}, reduced by {(1-reduction_factor)*100:.1f}%")
+            logging.debug(f"FEE_SAFETY_PENALTY: -{min(fee_excess * 0.05, 0.3):.3f} for excessive fee attempt")
+            
+        # Store the total safety penalty for the reward calculation
+        if not hasattr(self, 'safety_intervention_penalty'):
+            self.safety_intervention_penalty = 0.0
+        self.safety_intervention_penalty = safety_intervention_penalty
+        
+        # 🧹 DUST POSITION FILTER: Prevent tiny positions that cause chaos
+        min_position_size = 0.001  # Minimum 0.001 BTC (≈$30-50) to be considered a real position
+        
+        # If final position would be dust, round to zero instead
+        if abs(target_position_size) < min_position_size:
+            if abs(target_position_size) > 0:
+                logging.debug(f"DUST_POSITION_FILTERED: Position {target_position_size:.6f} BTC < {min_position_size} BTC minimum, setting to 0")
+                # Apply small penalty for creating dust positions
+                if not hasattr(self, 'dust_position_penalty'):
+                    self.dust_position_penalty = 0.0
+                self.dust_position_penalty += 0.01  # Small penalty to discourage dust creation
+            target_position_size = 0.0
+            trade_size = -self.position_size  # Close existing position completely
+        
+        # If trade would create a dust position, filter it out
+        elif abs(trade_size) > 0 and abs(trade_size * current_price) < 20.0:  # Less than $20 trade
+            logging.debug(f"DUST_TRADE_FILTERED: Trade ${abs(trade_size * current_price):.2f} < $20 minimum, skipping")
+            if not hasattr(self, 'dust_position_penalty'):
+                self.dust_position_penalty = 0.0
+            self.dust_position_penalty += 0.005  # Very small penalty for dust attempts
+            trade_size = 0.0  # No trade
+            target_position_size = self.position_size  # Keep current position
+            
+        # Recalculate final trade value and fee after all safety checks
+        final_trade_value = abs(trade_size * current_price)
+        final_estimated_fee = final_trade_value * self.taker_fee
+        
+        # 🛑 FINAL EMERGENCY BRAKE: Absolutely prevent trades > $50K
+        if final_trade_value > 50000.0:
+            penalty_logger.error(f"CRITICAL_TRADE_BLOCK: Trade value ${final_trade_value:.2f} > $50K limit, BLOCKING TRADE")
+            penalty_logger.error(f"  trade_size={trade_size:.6f} BTC, current_price=${current_price:.2f}")
+            penalty_logger.error(f"  position_size={self.position_size:.6f} -> {target_position_size:.6f}")
+            # Apply severe penalty and block the trade
+            if not hasattr(self, 'critical_trade_block_penalty'):
+                self.critical_trade_block_penalty = 0.0
+            self.critical_trade_block_penalty += 1.0  # Severe penalty
+            trade_size = 0.0  # Block the trade completely
+            final_trade_value = 0.0
+            final_estimated_fee = 0.0
+        
+        # Log if this is still a large trade for monitoring
+        if final_estimated_fee > 100:
+            episode_logger.info(f"LARGE_TRADE_DETECTED: Trade value=${final_trade_value:.2f}, Fee=${final_estimated_fee:.2f}")
+            episode_logger.info(f"  Position: {self.position_size:.6f} -> {target_position_size:.6f} BTC")
+            logging.info(f"  Leverage: {target_leverage:.2f}x, Risk: {risk_percentage*100:.1f}%")
         
         if abs(trade_size) > 0.001:  # Only trade if significant change
             # Efficient trade execution - single order instead of close + open
@@ -1016,8 +1313,35 @@ class FuturesTradingEnv(gym.Env):
         """
         trade_size = target_position_size - self.position_size
         
+        # ZERO PnL PREVENTION: Enhanced minimum trade size validation
         if abs(trade_size) < 0.001:
             return  # No significant trade needed
+        
+        # ZERO PnL PREVENTION: Validate target position size is meaningful
+        min_position_value = 1.0  # Minimum $1 position value
+        target_position_value = abs(target_position_size * current_price)
+        if target_position_value < min_position_value and abs(target_position_size) > 0:
+            logging.debug(f"TINY_POSITION_PREVENTED: Position value ${target_position_value:.6f} below minimum ${min_position_value}")
+            return  # Prevent meaningless tiny positions that create zero PnL trades
+        
+        # ADDITIONAL CHECK: Prevent excessive position modifications in same step
+        if hasattr(self, '_last_modification_step') and self._last_modification_step == self.current_step:
+            if hasattr(self, '_modifications_this_step'):
+                self._modifications_this_step += 1
+            else:
+                self._modifications_this_step = 1
+            
+            if self._modifications_this_step > 3:  # Max 3 modifications per step
+                logging.debug(f"EXCESSIVE_MODIFICATIONS: Preventing {self._modifications_this_step}th modification in step {self.current_step}")
+                # Apply penalty for excessive modifications
+                if not hasattr(self, 'excessive_modification_penalty'):
+                    self.excessive_modification_penalty = 0.0
+                self.excessive_modification_penalty += 0.05  # Strong penalty for excessive modifications
+                penalty_logger.error(f"EXCESSIVE_MODIFICATION_PENALTY: step={self.current_step}, modifications={self._modifications_this_step}, penalty=0.05")
+                return
+        else:
+            self._last_modification_step = self.current_step
+            self._modifications_this_step = 1
         
         # Count ANY significant trade execution (BUY/SELL action)
         self.episode_trades += 1
@@ -1025,14 +1349,51 @@ class FuturesTradingEnv(gym.Env):
         # Calculate realized PnL if we have an existing position being modified
         realized_pnl = 0.0
         
+        # ZERO PnL PREVENTION: Validate prices before calculating PnL
+        if current_price <= 0 or np.isnan(current_price):
+            logging.error(f"ZERO_PNL_PREVENTION: Invalid current_price={current_price} at step {self.current_step}")
+            return  # Abort trade to prevent zero PnL phantom execution
+        
+        # ZERO PnL PREVENTION: Validate position size is not NaN
+        if np.isnan(target_position_size):
+            logging.error(f"ZERO_PNL_PREVENTION: NaN target_position_size at step {self.current_step}")
+            return  # Abort trade to prevent invalid execution
+        
         if self.position_size != 0:
+            # ZERO PnL PREVENTION: Validate existing position has valid entry price
+            if self.entry_price <= 0 or np.isnan(self.entry_price):
+                # Silent penalty - only log at debug level since penalty is applied
+                logging.debug(f"ZERO_PNL_PREVENTION: Existing position has invalid entry_price={self.entry_price}")
+                # EMERGENCY FIX: Set entry price to current price to prevent zero PnL
+                self.entry_price = current_price
+                episode_logger.info(f"EMERGENCY_ENTRY_PRICE_FIX: Set entry_price to current_price={current_price}")
+                # Apply penalty for causing this emergency fix
+                if not hasattr(self, 'zero_pnl_prevention_penalty'):
+                    self.zero_pnl_prevention_penalty = 0.0
+                self.zero_pnl_prevention_penalty += 0.15  # Heavy penalty for invalid state
+                logging.debug(f"ZERO_PNL_PREVENTION_PENALTY: -{self.zero_pnl_prevention_penalty:.4f} for invalid entry price")
+                # Also ensure trade_start_step is set
+                if not self.trade_start_step:
+                    self.trade_start_step = self.current_step
+                # Continue with trade execution - this is now safe
+            
             # We're modifying an existing position
             if np.sign(target_position_size) != np.sign(self.position_size):
-                # Position flip: calculate PnL on the closed portion
+                # Position flip: calculate PnL on the closed portion - FIXED: Use abs(position_size) for correct short calculations
                 if self.position_side == 1:  # Closing long
-                    realized_pnl = self.position_size * (current_price - self.entry_price)
+                    realized_pnl = abs(self.position_size) * (current_price - self.entry_price)
                 else:  # Closing short
-                    realized_pnl = self.position_size * (self.entry_price - current_price)
+                    realized_pnl = abs(self.position_size) * (self.entry_price - current_price)
+                
+                # ZERO PnL PREVENTION: Validate calculated PnL makes sense
+                if abs(realized_pnl) < 0.001 and abs(current_price - self.entry_price) > 0.001:
+                    logging.debug(f"ZERO_PNL_DETECTED: Suspiciously small PnL={realized_pnl:.6f} despite price movement from {self.entry_price} to {current_price}")
+                    # Apply penalty for zero PnL detection
+                    if not hasattr(self, 'zero_pnl_detection_penalty'):
+                        self.zero_pnl_detection_penalty = 0.0
+                    self.zero_pnl_detection_penalty += 0.025  # Penalty for zero PnL anomaly
+                    penalty_logger.error(f"ZERO_PNL_DETECTION_PENALTY: PnL={realized_pnl:.6f}, price_move={abs(current_price - self.entry_price):.6f}, penalty=0.025")
+                    # Still allow the trade but flag it for investigation
                 
                 # Update realized PnL tracking
                 self.total_realized_pnl += realized_pnl
@@ -1059,7 +1420,32 @@ class FuturesTradingEnv(gym.Env):
         
         # Calculate trading fees on the net trade volume (efficient!)
         trade_value = abs(trade_size * current_price)
-        trading_fee = trade_value * self.taker_fee
+        base_fee = trade_value * self.taker_fee
+        
+        # EMERGENCY FEE CAP: Prevent unrealistic fees (only as safety net for truly broken trades)
+        max_reasonable_fee = trade_value * 0.01  # 1% maximum fee rate
+        trading_fee = min(base_fee, max_reasonable_fee)
+        
+        # DIAGNOSTIC LOGGING: Track high fee scenarios
+        if trading_fee > 100:  # Log any fee over $100
+            logging.error(f"HIGH_FEE_DETECTED: Fee=${trading_fee:.2f} on trade_value=${trade_value:.2f}")
+            logging.error(f"  - trade_size={trade_size:.6f}, current_price=${current_price:.2f}")
+            logging.error(f"  - position_size={self.position_size:.6f} -> {target_position_size:.6f}")
+            logging.error(f"  - step={self.current_step}, taker_fee={self.taker_fee}")
+        
+        # Log when fee cap is applied for debugging
+        if trading_fee < base_fee:
+            logging.debug(f"FEE_CAP_APPLIED at step {self.current_step}: Fee capped from ${base_fee:.2f} to ${trading_fee:.2f} on trade value ${trade_value:.2f}")
+            # Apply penalty for hitting fee cap
+            if not hasattr(self, 'fee_cap_penalty'):
+                self.fee_cap_penalty = 0.0
+            self.fee_cap_penalty += 0.08  # Strong penalty for hitting fee cap
+            penalty_logger.error(f"FEE_CAP_PENALTY: base_fee=${base_fee:.2f}, capped_fee=${trading_fee:.2f}, penalty=0.08")
+        
+        # ZERO PnL PREVENTION: If fees would exceed position value, abort trade
+        if trading_fee > trade_value * 0.5:  # Fees can't be more than 50% of trade value
+            logging.error(f"EXCESSIVE_FEE_PREVENTED: Fee ${trading_fee:.2f} > 50% of trade value ${trade_value:.2f}")
+            return  # Abort trade
         
         # Update balance with realized PnL and fees
         self.balance += realized_pnl - trading_fee
@@ -1069,6 +1455,15 @@ class FuturesTradingEnv(gym.Env):
         old_position_size = self.position_size
         self.position_size = target_position_size
         
+        # Store the target position size for logging BEFORE validation (CRITICAL FIX)
+        # This ensures trade logs show the intended position size, not the validated size
+        final_position_size_for_logging = self.position_size
+        
+        # POSITION STATE VALIDATION: Ensure consistency after position update
+        # Only validate if there was a meaningful change to avoid excessive corrections
+        if abs(old_position_size - self.position_size) > 0.0001:
+            self._validate_and_fix_position_state()
+        
         if abs(self.position_size) > 0.001:
             # We have a position
             self.position_side = 1 if self.position_size > 0 else -1
@@ -1076,12 +1471,26 @@ class FuturesTradingEnv(gym.Env):
             # Update entry price for new or flipped positions
             if old_position_size == 0 or np.sign(old_position_size) != np.sign(self.position_size):
                 # New position or position flip
+                # SAFETY CHECK: Ensure entry price is valid
+                if current_price <= 0:
+                    logging.error(f"INVALID_ENTRY_PRICE: Cannot set entry_price to {current_price}, using fallback")
+                    current_price = self._safe_get_price_data(self.current_step, 'close', 50000.0)
+                
                 self.entry_price = current_price
-                self.trade_id += 1
+                # Only increment trade_id for non-FLIP operations (FLIP handles its own ID management)
+                if old_position_size == 0:  # True new position, not a flip
+                    self.trade_id += 1
                 self.trade_start_step = self.current_step
+                # CRITICAL FIX: Store the original entry datetime for consistent logging
+                self.trade_entry_datetime = self.df.iloc[self.current_step]['timestamp'] if self.current_step < len(self.df) else f"step_{self.current_step}"
+                # CRITICAL FIX: Store the original entry price for trade logging consistency
+                self.trade_entry_price = current_price
+                # Store equity at trade entry for consistent net worth tracking
                 self.entry_equity = self.equity
                 # Reset reward accumulation for new trade
                 self.current_trade_reward = 0.0
+                
+                logging.debug(f"NEW_POSITION: entry_price=${self.entry_price:.2f}, size={self.position_size:.6f}, step={self.current_step}")
             
             # Update margin and risk management
             self.margin_used = abs(self.position_size * current_price) / self.leverage if self.leverage > 0 else 0
@@ -1104,46 +1513,158 @@ class FuturesTradingEnv(gym.Env):
             elif abs(self.position_size) < 0.001:
                 action_type = "CLOSE_LONG" if old_position_size > 0 else "CLOSE_SHORT" 
             elif old_position_size != 0 and np.sign(old_position_size) != np.sign(self.position_size):
-                action_type = "FLIP_LONG_TO_SHORT" if old_position_size > 0 else "FLIP_SHORT_TO_LONG"
+                # CRITICAL FIX: FLIP operations need TWO separate trade logs
+                if abs(old_position_size) > 0.001:
+                    # Calculate trade duration for the closing trade
+                    close_duration_steps = self.current_step - (self.trade_start_step or self.current_step)
+                    close_duration_hours = close_duration_steps * 0.25  # 15min intervals
+                    
+                    # Log the CLOSE of the old position first
+                    close_action_type = "CLOSE_LONG" if old_position_size > 0 else "CLOSE_SHORT"
+                    close_trade_data = {
+                        'trade_id': self._get_unique_trade_id(),
+                        'training_step': self.current_step,
+                        'training_iteration': getattr(self, 'training_iteration', 0),
+                        'entry_datetime': self.trade_entry_datetime or (self.df.iloc[self.current_step]['timestamp'] if self.current_step < len(self.df) else f"step_{self.current_step}"),
+                        'close_datetime': self.df.iloc[self.current_step]['timestamp'] if self.current_step < len(self.df) else f"step_{self.current_step}",
+                        'side': 'FLAT',
+                        'entry_action': close_action_type,
+                        'entry_price': round(self.trade_entry_price or self.entry_price, 4),  # FIXED: Use stored trade entry price for consistency
+                        'close_price': round(current_price, 4),
+                        'net_pnl': realized_pnl,
+                        'close_reward': 0,
+                        'entry_net_worth': getattr(self, 'entry_equity', self.equity),  # Use stored entry equity
+                        'close_net_worth': self.equity,
+                        'trade_duration_hours': close_duration_hours,
+                        'status': 'CLOSED',
+                        'win_loss': 'WIN' if realized_pnl > 0 else 'LOSS' if realized_pnl < 0 else 'NEUTRAL',
+                        'position_size': abs(old_position_size),  # FIXED: Log actual closed position size instead of 0.0
+                        'fees_paid': trading_fee * 0.5,  # Split fee between close and open
+                        'stop_loss_price': '',
+                        'take_profit_price': '',
+                        'close_reason': close_action_type
+                    }
+                    self.logger.log_trade(close_trade_data)
+                    
+                    # Increment trade ID for the new position
+                    self.trade_id += 1
+                    
+                    # CRITICAL FIX: Reset trade_start_step for the new trade
+                    self.trade_start_step = self.current_step
+                    
+                    # CRITICAL FIX: Reset entry datetime for the new trade
+                    self.trade_entry_datetime = self.df.iloc[self.current_step]['timestamp'] if self.current_step < len(self.df) else f"step_{self.current_step}"
+                    # CRITICAL FIX: Store the original entry price for trade logging consistency  
+                    self.trade_entry_price = current_price
+                    # Store equity at trade entry for consistent net worth tracking
+                    self.entry_equity = self.equity
+                    
+                    # Log the OPEN of the new position (new trade starts with 0 duration)
+                    open_action_type = "OPEN_LONG" if final_position_size_for_logging > 0 else "OPEN_SHORT"
+                    open_trade_data = {
+                        'trade_id': self._get_unique_trade_id(),
+                        'training_step': self.current_step,
+                        'training_iteration': getattr(self, 'training_iteration', 0),
+                        'entry_datetime': self.df.iloc[self.current_step]['timestamp'] if self.current_step < len(self.df) else f"step_{self.current_step}",
+                        'close_datetime': '',
+                        'side': 'LONG' if final_position_size_for_logging > 0 else 'SHORT',
+                        'entry_action': open_action_type,
+                        'entry_price': current_price,
+                        'close_price': '',
+                        'net_pnl': 0.0,  # New position starts with zero PnL
+                        'close_reward': 0,
+                        'entry_net_worth': self.equity,  # For new trades, current equity is the entry equity
+                        'close_net_worth': self.equity,
+                        'trade_duration_hours': 0,  # New trade starts with 0 duration
+                        'status': 'OPEN',
+                        'win_loss': 'NEUTRAL',
+                        'position_size': final_position_size_for_logging,  # Use intended position size for FLIP OPEN
+                        'fees_paid': trading_fee * 0.5,  # Split fee between close and open
+                        'stop_loss_price': getattr(self, 'stop_loss_price', ''),
+                        'take_profit_price': getattr(self, 'take_profit_price', ''),
+                        'close_reason': ''  # New OPEN trade has no close reason yet
+                    }
+                    self.logger.log_trade(open_trade_data)
+                    
+                    # Set flag to prevent duplicate logging
+                    self._efficient_trade_logged = True
+                    return  # Exit early since we've handled FLIP logging
+                else:
+                    # No position to flip, treat as new position
+                    action_type = "OPEN_LONG" if self.position_size > 0 else "OPEN_SHORT"
+                    print(f"WARNING: Step {self.current_step}: Cannot flip position {old_position_size}, treating as OPEN")
             else:
                 action_type = "ADJUST_LONG" if self.position_size > 0 else "ADJUST_SHORT"
             
+            # Standard single-trade logging for non-FLIP operations
             # Determine the correct entry price for logging
             # For new positions/opens, use current_price
-            # For closes/flips, use the original entry_price before it gets reset
+            # For closes, use the original trade_entry_price to preserve consistency
             log_entry_price = current_price
-            if action_type in ["CLOSE", "FLIP"] and hasattr(self, 'entry_price') and self.entry_price > 0:
-                log_entry_price = self.entry_price
+            if action_type in ["CLOSE_LONG", "CLOSE_SHORT"] and hasattr(self, 'trade_entry_price') and self.trade_entry_price > 0:
+                log_entry_price = self.trade_entry_price
+            
+            # Calculate trade duration for closing trades
+            if action_type in ["CLOSE_LONG", "CLOSE_SHORT"]:
+                # DURATION FIX: Ensure we have a valid trade_start_step
+                if self.trade_start_step is not None and self.trade_start_step <= self.current_step:
+                    duration_steps = self.current_step - self.trade_start_step
+                    duration_hours = duration_steps * 0.25  # 15min intervals
+                else:
+                    # Fallback: if trade_start_step is invalid, assume 1 step minimum
+                    duration_hours = 0.25  # Minimum 15 minutes
+                    logging.debug(f"DURATION_FALLBACK: trade_start_step={self.trade_start_step}, using minimum duration")
+            else:
+                duration_hours = 0  # New trades start with 0 duration
+            
+            # Determine the correct entry datetime
+            # CRITICAL FIX: Always use the stored trade_entry_datetime for consistency
+            if hasattr(self, 'trade_entry_datetime') and self.trade_entry_datetime is not None:
+                entry_datetime = self.trade_entry_datetime
+            elif action_type in ["OPEN_LONG", "OPEN_SHORT"]:
+                # For new positions, use current timestamp and store it
+                entry_datetime = self.df.iloc[self.current_step]['timestamp'] if self.current_step < len(self.df) else f"step_{self.current_step}"
+                self.trade_entry_datetime = entry_datetime  # Store for future use in this trade
+            else:
+                # Fallback: try to reconstruct from trade_start_step (but DON'T overwrite trade_entry_datetime)
+                if hasattr(self, 'trade_start_step') and self.trade_start_step is not None and self.trade_start_step < len(self.df):
+                    entry_datetime = self.df.iloc[self.trade_start_step]['timestamp']
+                    # DO NOT overwrite trade_entry_datetime here - it should persist from original entry
+                else:
+                    # Last resort fallback (also don't overwrite)
+                    entry_datetime = self.df.iloc[self.current_step]['timestamp'] if self.current_step < len(self.df) else f"step_{self.current_step}"
             
             # Create trade data dictionary for logging
             trade_data = {
-                'trade_id': f"TRADE_{self.trade_id:05d}",
+                'trade_id': self._get_unique_trade_id(),
                 'training_step': self.current_step,
                 'training_iteration': getattr(self, 'training_iteration', 0),
-                'entry_datetime': self.df.iloc[self.current_step]['timestamp'] if self.current_step < len(self.df) else f"step_{self.current_step}",
-                'close_datetime': '',  # Will be filled when trade closes
-                'side': 'LONG' if self.position_size > 0 else 'SHORT' if self.position_size < 0 else 'FLAT',
+                'entry_datetime': entry_datetime,
+                'close_datetime': self.df.iloc[self.current_step]['timestamp'] if action_type in ["CLOSE_LONG", "CLOSE_SHORT"] else '',  # Set close datetime for closed trades
+                'side': 'LONG' if final_position_size_for_logging > 0 else 'SHORT' if final_position_size_for_logging < 0 else 'FLAT',
                 'entry_action': action_type,
-                'entry_price': log_entry_price,
-                'close_price': '',  # Will be filled when trade closes
-                'net_pnl': realized_pnl,
+                'entry_price': round(log_entry_price, 4),  # Round to 4 decimal places for precision
+                'close_price': round(current_price, 4) if action_type in ["CLOSE_LONG", "CLOSE_SHORT"] else '',  # Round and set price for closed trades
+                'net_pnl': round(realized_pnl, 6) if action_type in ["CLOSE_LONG", "CLOSE_SHORT"] else 0.0,  # Round PnL and only show on trade closure
                 'close_reward': 0,  # Will be filled when trade closes
-                'entry_net_worth': self.equity,
+                'entry_net_worth': getattr(self, 'entry_equity', self.equity),  # Use stored entry equity
                 'close_net_worth': self.equity,
-                'trade_duration_hours': 0,
-                'status': 'OPEN' if abs(self.position_size) > 0.001 else 'CLOSED',
-                'win_loss': 'WIN' if realized_pnl > 0 else 'LOSS' if realized_pnl < 0 else 'NEUTRAL',
-                'position_size': self.position_size,
+                'trade_duration_hours': duration_hours,
+                'status': 'OPEN' if abs(final_position_size_for_logging) > 0.001 else 'CLOSED',
+                'win_loss': 'WIN' if realized_pnl > 0 and action_type in ["CLOSE_LONG", "CLOSE_SHORT"] else 'LOSS' if realized_pnl < 0 and action_type in ["CLOSE_LONG", "CLOSE_SHORT"] else 'NEUTRAL',
+                'position_size': final_position_size_for_logging,  # Use the intended position size, not the validated one
                 'fees_paid': trading_fee,
                 'stop_loss_price': getattr(self, 'stop_loss_price', ''),
                 'take_profit_price': getattr(self, 'take_profit_price', ''),
-                'close_reason': action_type
+                'entry_signal': action_type if action_type in ["OPEN_LONG", "OPEN_SHORT"] else '',  # Entry signal for opening trades
+                'exit_signal': action_type if action_type in ["CLOSE_LONG", "CLOSE_SHORT"] else '',  # Exit signal for closing trades
+                'close_reason': action_type if action_type in ["CLOSE_LONG", "CLOSE_SHORT"] else ''  # Only show close reason when trade is actually closed
             }
             
             self.logger.log_trade(trade_data)
             
             # Set flag to prevent duplicate logging in _close_position
-            if action_type in ["CLOSE", "FLIP"]:
+            if action_type in ["CLOSE_LONG", "CLOSE_SHORT"]:
                 self._efficient_trade_logged = True
     
     def _update_stop_loss_take_profit(self, current_price: float):
@@ -1258,6 +1779,121 @@ class FuturesTradingEnv(gym.Env):
         except Exception as e:
             return {'mode': 'dynamic', 'error': str(e)}
     
+    def _validate_and_fix_position_state(self):
+        """
+        POSITION STATE VALIDATION (Fix #3): Validate and fix position state consistency.
+        
+        Ensures:
+        1. Position side matches position size sign
+        2. Entry price is valid when position is open
+        3. Position variables are consistent
+        4. Edge cases are handled gracefully
+        
+        CRITICAL: Now tracks corrections and applies penalties to discourage invalid states
+        """
+        # Initialize position state penalty tracking
+        if not hasattr(self, 'position_state_penalty'):
+            self.position_state_penalty = 0.0
+        
+        position_state_penalty = 0.0
+        corrections_made = 0
+        
+        # Fix position side based on position size
+        if abs(self.position_size) < 0.001:
+            # No meaningful position
+            if self.position_side != 0:
+                # Silent penalty - only log at debug level since penalty is applied
+                logging.debug(f"POSITION_STATE_FIX: Correcting position_side from {self.position_side} to 0 (no position)")
+                position_state_penalty += 0.02  # Small penalty for incorrect position side
+                corrections_made += 1
+                self.position_side = 0
+            
+            # Reset position-related variables for closed positions
+            # BUT ONLY if position_size is actually zero (not just small)
+            # CRITICAL FIX: Use stricter threshold to avoid resetting valid small positions
+            if abs(self.position_size) < 0.00001:  # Much stricter threshold (0.00001 BTC ≈ $0.50)
+                if self.entry_price != 0.0 or self.margin_used != 0.0:
+                    episode_logger.info("POSITION_STATE_FIX: Resetting position variables for truly closed position")
+                    self.entry_price = 0.0
+                    self.margin_used = 0.0
+                    self.unrealized_pnl = 0.0
+                    self.stop_loss_price = None
+                    self.take_profit_price = None
+                    self.liquidation_price = None
+            else:
+                # Small but non-zero position - ensure it has valid entry price
+                if self.entry_price <= 0:
+                    current_price = self._safe_get_price_data(self.current_step, 'close', 50000.0)
+                    # Silent penalty - only log at debug level since penalty is applied
+                    logging.debug(f"POSITION_STATE_FIX: Small position {self.position_size:.6f} missing entry price, using {current_price}")
+                    position_state_penalty += 0.05  # Larger penalty for invalid entry price
+                    corrections_made += 1
+                    self.entry_price = current_price
+                    if not self.trade_start_step:
+                        self.trade_start_step = self.current_step
+        else:
+            # We have a meaningful position
+            expected_side = 1 if self.position_size > 0 else -1
+            
+            if self.position_side != expected_side:
+                # Silent penalty - only log at debug level since penalty is applied
+                logging.debug(f"POSITION_STATE_FIX: Correcting position_side from {self.position_side} to {expected_side}")
+                position_state_penalty += 0.03  # Penalty for wrong position side
+                corrections_made += 1
+                self.position_side = expected_side
+            
+            # Validate entry price for open positions
+            if self.entry_price <= 0:
+                # Try to get current price as fallback
+                current_price = self._safe_get_price_data(self.current_step, 'close', 50000.0)
+                # Silent penalty - only log at debug level since penalty is applied
+                logging.debug(f"POSITION_STATE_FIX: Invalid entry_price {self.entry_price}, using fallback {current_price}")
+                position_state_penalty += 0.1  # Heavy penalty for invalid entry price on active position
+                corrections_made += 1
+                self.entry_price = current_price
+                # Also set trade start step if missing
+                if not self.trade_start_step:
+                    self.trade_start_step = self.current_step
+                    episode_logger.info(f"POSITION_STATE_FIX: Set missing trade_start_step to {self.current_step}")
+        
+        # Validate numeric consistency
+        if np.isnan(self.position_size):
+            penalty_logger.error(f"POSITION_STATE_FIX: NaN position_size detected, resetting to 0 at step {getattr(self, 'current_step', 'unknown')}")
+            logging.debug("POSITION_STATE_FIX: NaN position_size detected, resetting to 0")
+            position_state_penalty += 0.2  # Very heavy penalty for NaN states
+            corrections_made += 1
+            self.position_size = 0.0
+            self.position_side = 0
+        
+        if np.isnan(self.entry_price):
+            current_price = self._safe_get_price_data(self.current_step, 'close', 50000.0)
+            penalty_logger.error(f"POSITION_STATE_FIX: NaN entry_price detected, using {current_price} at step {getattr(self, 'current_step', 'unknown')}")
+            logging.debug(f"POSITION_STATE_FIX: NaN entry_price detected, using {current_price}")
+            position_state_penalty += 0.15  # Heavy penalty for NaN entry price
+            corrections_made += 1
+            self.entry_price = current_price if abs(self.position_size) > 0.001 else 0.0
+        
+        # Apply escalating penalties for multiple corrections in same step
+        if corrections_made > 1:
+            chaos_multiplier = 1 + corrections_made * 0.5
+            position_state_penalty *= chaos_multiplier  # Multiply penalty for chaos
+            # Log chaos to separate file - keeps terminal clean
+            penalty_logger.error(f"POSITION_STATE_CHAOS_PENALTY: {corrections_made} corrections needed, penalty x{chaos_multiplier:.1f} at step {getattr(self, 'current_step', 'unknown')}")
+            # Optional: Also log to debug for development
+            logging.debug(f"POSITION_STATE_CHAOS_PENALTY: {corrections_made} corrections needed, penalty x{chaos_multiplier:.1f}")
+        
+        # Store the penalty for reward calculation
+        self.position_state_penalty = position_state_penalty
+        
+        if position_state_penalty > 0:
+            # Silent penalty - only log at debug level since penalty is applied
+            logging.debug(f"POSITION_STATE_PENALTY: -{position_state_penalty:.4f} for {corrections_made} state corrections")
+        
+        # Log state after validation (for debugging) - reduced frequency
+        if hasattr(self, 'current_step') and self.current_step % 500 == 0:  # Reduced from 100 to 500
+            logging.debug(f"POSITION_STATE: size={self.position_size:.6f}, side={self.position_side}, "
+                         f"entry=${self.entry_price:.2f}, margin=${self.margin_used:.2f}")
+    
     def _open_or_adjust_position(self, target_position_size: float, current_price: float):
         """
         DEPRECATED: This method is kept for compatibility but is inefficient.
@@ -1268,105 +1904,109 @@ class FuturesTradingEnv(gym.Env):
         # For compatibility, just call the efficient method
         self._execute_efficient_trade(target_position_size, current_price)
     
-    def _close_position(self, current_price: float, reason: str):
-        """Close current position"""
+    # REMOVED: _close_position method (legacy code)
+    # This method was unused - all trade closures now go through _execute_efficient_trade() for consistency
+    
+    def _force_close_position_no_fees(self, current_price: float, reason: str):
+        """
+        Force close position at episode end without charging fees.
+        CRITICAL FIX: Updates existing OPEN trade instead of creating new entry.
+        """
         if self.position_size == 0:
             return
         
-        # Validate that current_price is not zero
+        # Validate price
         if current_price <= 0:
-            logging.error(f"ZERO_PRICE_DETECTED in _close_position: current_price={current_price} at step {self.current_step}")
-            # Get a valid price from the last available data
             current_price = self._safe_get_price_data(self.current_step, 'close')
-            logging.info(f"PRICE_CORRECTED in _close_position: Using price={current_price} instead")
         
-        # Validate closing price against market data
-        market_price = self._safe_get_price_data(self.current_step, 'close')
-        timestamp = self._safe_get_price_data(self.current_step, 'timestamp', 0)
-        
-        is_valid, validation_details = self.price_validator.validate_price(
-            trade_price=current_price,
-            market_price=market_price,
-            timestamp=timestamp,
-            step=self.current_step,
-            context="POSITION_CLOSE"
-        )
-        
-        if not is_valid:
-            logging.error(f"PRICE_VALIDATION_FAILED during position close: {validation_details}")
-        
-        # Calculate PnL
+        # Calculate PnL without fees
+        # Calculate PnL for forced closure - FIXED: Use abs(position_size) for correct short calculations  
         if self.position_side == 1:  # Long
-            pnl = self.position_size * (current_price - self.entry_price)
+            pnl = abs(self.position_size) * (current_price - self.entry_price)
         else:  # Short
-            pnl = self.position_size * (self.entry_price - current_price)
+            pnl = abs(self.position_size) * (self.entry_price - current_price)
         
-        # Calculate fees
-        trade_value = abs(self.position_size * current_price)
-        exit_fee = trade_value * self.taker_fee
-        
-        # Update balance
-        self.balance += pnl - exit_fee
-        self.total_fees += exit_fee
+        # Update balance with PnL only (NO FEES for episode cleanup)
+        self.balance += pnl
         self.total_realized_pnl += pnl
         self.last_trade_pnl = pnl
         
-        # Update consecutive loss/win tracking
-        if pnl > 0:
-            self.consecutive_wins += 1
-            self.consecutive_losses = 0
-        else:
-            self.consecutive_losses += 1
-            self.consecutive_wins = 0
+        # CRITICAL FIX: Log closure of existing trade (NOT a new trade)
+        if self.logger:
+            # Calculate duration for episode cleanup
+            cleanup_duration_steps = self.current_step - (self.trade_start_step or self.current_step)
+            cleanup_duration_hours = cleanup_duration_steps * 0.25  # 15min intervals
             
-            # Increase penalty multiplier for consecutive losses
-            if self.consecutive_losses >= self.consecutive_loss_threshold:
-                self.loss_penalty_multiplier = min(3.0, 1.0 + (self.consecutive_losses - self.consecutive_loss_threshold) * 0.2)
+            # Use SAME trade_id to update existing OPEN trade record
+            trade_data = {
+                'trade_id': self._get_unique_trade_id(),  # SAME ID as the open trade
+                'training_step': self.current_step,
+                'training_iteration': getattr(self, 'training_iteration', 0),
+                'entry_datetime': self.trade_entry_datetime or self._safe_get_df_data(self.trade_start_step or self.current_step, 'timestamp', f"step_{self.trade_start_step or self.current_step}"),
+                'close_datetime': self._safe_get_df_data(self.current_step, 'timestamp', f"step_{self.current_step}"),
+                'side': 'FLAT',  # Position is now closed
+                'entry_action': f"FORCE_CLOSE_{reason}",  # Clear action indicating forced closure
+                'entry_price': self.entry_price,
+                'close_price': current_price,
+                'net_pnl': pnl,
+                'close_reward': 0.0,
+                'entry_net_worth': getattr(self, 'entry_equity', self.equity),  # Use stored entry equity
+                'close_net_worth': self.equity,
+                'trade_duration_hours': cleanup_duration_hours,
+                'status': 'CLOSED',  # CRITICAL: Mark as CLOSED, not FORCE_CLOSED
+                'win_loss': 'WIN' if pnl > 0 else 'LOSS' if pnl < 0 else 'NEUTRAL',
+                'position_size': 0.0,  # Position is now zero
+                'fees_paid': 0.0,  # NO FEES for episode cleanup
+                'stop_loss_price': '',
+                'take_profit_price': '',
+                'close_reason': f"FORCE_CLOSE_{reason}"
+            }
+            self.logger.log_trade(trade_data)
+            
+            # Log episode cleanup info for debugging
+            episode_logger.info(f"EPISODE_CLEANUP: Closed trade {self.trade_id:05d} at step {self.current_step}")
+            episode_logger.info(f"  Position: {self.position_size:.6f} -> 0.0, PnL: ${pnl:.2f}")
         
-        # Calculate funding costs (simplified)
-        if self.trade_start_step:
-            hours_held = (self.current_step - self.trade_start_step) * 0.25  # 15min intervals
-            funding_periods = int(hours_held / 8)  # Funding every 8 hours
-            funding_cost = abs(self.position_size * self.entry_price) * self.funding_rate * funding_periods
-            if self.position_side == -1:  # Short positions typically pay funding
-                self.balance -= funding_cost
-                self.total_funding_costs += funding_cost
-        
-        # Log trade (only if not already logged by efficient trading system)
-        if self.logger and not getattr(self, '_efficient_trade_logged', False):
-            self._log_trade(current_price, pnl, reason)
-        
-        # Reset the efficient trade logging flag
-        self._efficient_trade_logged = False
-        
-        # Reset position
+        # Reset position completely
         self.position_size = 0.0
         self.position_side = 0
         self.entry_price = 0.0
+        self.trade_entry_price = 0.0  # Reset trade entry price
         self.margin_used = 0.0
         self.unrealized_pnl = 0.0
         self.leverage = 0.0
         self.stop_loss_price = None
         self.take_profit_price = None
         self.liquidation_price = None
-        
-        # Reset trade reward accumulation
         self.current_trade_reward = 0.0
         
         # Update episode stats
-        # Note: episode_trades is now counted in _execute_efficient_trade
         self.episode_profit += pnl
+        
+        logging.info(f"FORCE_CLOSED position at episode end: PnL={pnl:.2f}, NO FEES CHARGED")
     
     def _log_trade(self, exit_price: float, pnl: float, reason: str):
         """Log completed trade"""
         if not self.trade_start_step:
             return
         
+        # PRICE VALIDATION: Ensure exit_price is valid
+        if np.isnan(exit_price) or exit_price <= 0:
+            # Use current market price as fallback
+            current_price = self._safe_get_price_data(self.current_step, 'close', 0)
+            if np.isnan(current_price) or current_price <= 0:
+                # Last resort: use entry price
+                exit_price = getattr(self, 'entry_price', 40000.0)
+                print(f"WARNING: Step {self.current_step}: Invalid exit price, using entry price {exit_price}")
+            else:
+                exit_price = current_price
+                print(f"WARNING: Step {self.current_step}: Invalid exit price, using current price {exit_price}")
+        
         duration_steps = self.current_step - self.trade_start_step
         duration_hours = duration_steps * 0.25  # 15min intervals
         
-        # Use Unix timestamps to match efficient trade system format
-        entry_datetime = self._safe_get_price_data(self.trade_start_step, 'timestamp', 0)
+        # Use stored entry datetime for consistency, fallback to timestamp lookup
+        entry_datetime = self.trade_entry_datetime or self._safe_get_price_data(self.trade_start_step, 'timestamp', 0)
         close_datetime = self._safe_get_price_data(self.current_step, 'timestamp', 0)
         
         # Preserve entry price - if it's zero, try to get it from trade start data
@@ -1374,7 +2014,12 @@ class FuturesTradingEnv(gym.Env):
         if logged_entry_price <= 0.0 and self.trade_start_step:
             # Fall back to using price data from trade start step
             logged_entry_price = self._safe_get_price_data(self.trade_start_step, 'close')
-            logging.warning(f"ENTRY_PRICE_FALLBACK: Using price from trade start step {self.trade_start_step}: {logged_entry_price}")
+            logging.debug(f"ENTRY_PRICE_FALLBACK: Using price from trade start step {self.trade_start_step}: {logged_entry_price}")
+            # Apply penalty for entry price fallback
+            if not hasattr(self, 'entry_price_fallback_penalty'):
+                self.entry_price_fallback_penalty = 0.0
+            self.entry_price_fallback_penalty += 0.01  # Small penalty for entry price fallback
+            penalty_logger.error(f"ENTRY_PRICE_FALLBACK_PENALTY: fallback_price={logged_entry_price}, penalty=0.01")
         
         # Determine clear action label based on what actually happened
         if reason in ["CANCEL_ACTION", "LIQUIDATION", "STOP_LOSS", "TAKE_PROFIT"]:
@@ -1385,7 +2030,7 @@ class FuturesTradingEnv(gym.Env):
             action_label = "CLOSE_SHORT"  # Closing a short position (covering)
         
         trade_data = {
-            'trade_id': f"TRADE_{self.trade_id:05d}",
+            'trade_id': self._get_unique_trade_id(),
             'training_step': self.current_step,
             'training_iteration': self.training_iteration,
             'entry_datetime': entry_datetime,
@@ -1468,13 +2113,13 @@ class FuturesTradingEnv(gym.Env):
         Returns:
             Current margin balance
         """
-        # Calculate unrealized PnL at mark price
+        # Calculate unrealized PnL at mark price - FIXED: Use abs(position_size) for correct short calculations
         if self.position_size == 0:
             unrealized_pnl = 0.0
         elif self.position_side == 1:  # Long
-            unrealized_pnl = self.position_size * (mark_price - self.entry_price)
+            unrealized_pnl = abs(self.position_size) * (mark_price - self.entry_price)
         else:  # Short
-            unrealized_pnl = self.position_size * (self.entry_price - mark_price)
+            unrealized_pnl = abs(self.position_size) * (self.entry_price - mark_price)
         
         return self.balance + unrealized_pnl
     
@@ -1596,6 +2241,7 @@ class FuturesTradingEnv(gym.Env):
             self.position_size = 0.0
             self.position_side = 0
             self.entry_price = 0.0
+            self.trade_entry_price = 0.0  # Reset trade entry price
             self.margin_used = 0.0
             self.unrealized_pnl = 0.0
             self.leverage = 0.0
@@ -1647,6 +2293,30 @@ class FuturesTradingEnv(gym.Env):
         base_reward = np.clip(base_reward, 
                             self.reward_config['base_reward_cap_negative'], 
                             self.reward_config['base_reward_cap_positive'])
+        
+        # === ANTI-OVERTRADING PENALTY (NEW) ===
+        overtrading_penalty = 0.0
+        
+        # Track recent action frequency
+        if not hasattr(self, 'recent_actions'):
+            self.recent_actions = []
+        
+        # Record current action (if not HOLD)
+        if hasattr(self, 'last_action_type') and self.last_action_type != "HOLD":
+            self.recent_actions.append(self.current_step)
+            
+        # Keep only last 10 steps
+        self.recent_actions = [step for step in self.recent_actions if step > self.current_step - 10]
+        
+        # Penalize excessive trading in recent window
+        recent_trades = len(self.recent_actions)
+        if recent_trades >= 3:  # 3+ trades in 10 steps = overtrading
+            overtrading_penalty = 0.01 * (recent_trades - 2) ** 2  # Quadratic penalty
+            
+        # Penalize position flipping
+        if (hasattr(self, 'last_action_type') and 
+            self.last_action_type in ["FLIP_LONG_TO_SHORT", "FLIP_SHORT_TO_LONG"]):
+            overtrading_penalty += 0.005  # Additional flip penalty
         
         # === RISK-ADJUSTED COMPONENTS ===
         risk_penalty = 0.0
@@ -1718,49 +2388,75 @@ class FuturesTradingEnv(gym.Env):
         if self.leverage > self.reward_config['excessive_leverage_threshold']:
             special_penalty += (self.leverage - self.reward_config['excessive_leverage_threshold']) * self.reward_config['excessive_leverage_multiplier']
         
-        # === POSITIVE REWARDS === - using configurable parameters
-        positive_bonus = 0.0
+        # === PnL-AWARE POSITION MANAGEMENT REWARDS ===
+        pnl_management_reward = 0.0
         
-        # HOLD action reward (encourage patience)
+        # Track unrealized PnL trend
+        if not hasattr(self, 'unrealized_pnl_history'):
+            self.unrealized_pnl_history = []
+        
+        # Record current unrealized PnL
+        self.unrealized_pnl_history.append(self.unrealized_pnl)
+        
+        # Keep only last 5 steps for trend analysis
+        self.unrealized_pnl_history = self.unrealized_pnl_history[-5:]
+        
+        # Calculate PnL trend (positive = improving, negative = deteriorating)
+        pnl_trend = 0.0
+        if len(self.unrealized_pnl_history) >= 3:
+            recent_pnl = np.mean(self.unrealized_pnl_history[-2:])
+            older_pnl = np.mean(self.unrealized_pnl_history[-3:-1])
+            if abs(older_pnl) > 0.01:  # Avoid division by very small numbers
+                pnl_trend = (recent_pnl - older_pnl) / abs(older_pnl)
+            else:
+                pnl_trend = recent_pnl - older_pnl  # Simple difference for small values
+        
+        # Position-based rewards
         if hasattr(self, 'last_action_type'):
             if self.last_action_type == "HOLD":
-                # Base hold reward for patience
-                hold_reward = 0.001  # Small positive reward for holding
-                
-                # Bonus if market is volatile (good time to wait)
-                if len(self.price_data) > self.current_step + 1:
-                    current_price = self._safe_get_price_data(self.current_step, 'close', 0.0)
-                    if self.current_step >= 5 and current_price > 0:
-                        recent_volatility = np.std([
-                            self._safe_get_price_data(i, 'close', current_price)
-                            for i in range(max(0, self.current_step-5), self.current_step)
-                        ]) / current_price
-                        
-                        if recent_volatility > 0.02:  # High volatility
-                            hold_reward *= 2.0  # Double reward for holding during volatility
-                
-                # Bonus if no clear trend (good time to wait)
-                if hasattr(self, 'trend_strength') and self.trend_strength < 0.3:
-                    hold_reward *= 1.5  # 50% bonus for holding during unclear trends
-                
-                # Penalty for holding when there's a clear profitable opportunity
-                if self.position_size == 0 and len(self.equity_history) > 10:
-                    # Check if we missed a clear trend
-                    current_price = self._safe_get_price_data(self.current_step, 'close', 0.0)
-                    past_price = self._safe_get_price_data(max(0, self.current_step-10), 'close', current_price)
-                    if past_price > 0:
-                        recent_price_change = (current_price - past_price) / past_price
-                        if abs(recent_price_change) > 0.05:  # Strong 5%+ move
-                            hold_reward *= 0.5  # Reduce reward for missing opportunities
-                
-                positive_bonus += hold_reward
+                if abs(self.position_size) > 0.001:  # Holding an open position
+                    # RULE 1 & 3: Encourage HOLD when unrealized PnL is improving
+                    if pnl_trend > 0:
+                        pnl_management_reward += 0.01 * min(pnl_trend, 0.5)  # Scale with trend strength
+                        pnl_management_reward += 0.005  # Base reward for holding profitable trend
+                    
+                    # Slight penalty for holding when PnL is deteriorating significantly
+                    elif pnl_trend < -0.1:  # Only if strong negative trend
+                        pnl_management_reward -= 0.002 * min(abs(pnl_trend), 0.3)
+                    
+                    # Additional reward for holding profitable positions
+                    if self.unrealized_pnl > 0:
+                        pnl_management_reward += 0.002  # Encourage keeping profits
+                else:
+                    # No position - small reward for patience
+                    pnl_management_reward += 0.001
             
-            elif self.last_action_type == "CANCEL":
-                # Reward good exit decisions
-                if self.last_trade_pnl > 0:
-                    positive_bonus += 0.005  # Reward taking profits
-                elif self.unrealized_pnl < -0.02 * self.equity:  # Stop loss
-                    positive_bonus += 0.002  # Reward cutting losses
+            elif self.last_action_type in ["CANCEL", "CLOSE"]:
+                if abs(self.position_size) < 0.001:  # Successfully closed position
+                    # RULE 2: Encourage CLOSE when unrealized PnL was deteriorating
+                    if pnl_trend < -0.05:  # Strong negative trend
+                        pnl_management_reward += 0.01 * min(abs(pnl_trend), 0.5)  # Reward cutting losses
+                        pnl_management_reward += 0.008  # Base reward for smart exit
+                    
+                    # Reward taking profits (even if trend was positive)
+                    if len(self.unrealized_pnl_history) >= 2 and self.unrealized_pnl_history[-2] > 0:
+                        pnl_management_reward += 0.005  # Reward profit-taking
+                    
+                    # Penalty for closing during strong positive PnL trend
+                    if pnl_trend > 0.1:  # Strong positive trend
+                        pnl_management_reward -= 0.005 * min(pnl_trend, 0.3)  # Penalty for early exit
+            
+            elif self.last_action_type in ["FLIP_LONG_TO_SHORT", "FLIP_SHORT_TO_LONG"]:
+                # Evaluate flip based on PnL trend of previous position
+                if len(self.unrealized_pnl_history) >= 2:
+                    prev_pnl = self.unrealized_pnl_history[-2]
+                    if pnl_trend < -0.05 and prev_pnl < 0:  # Was losing, good to flip
+                        pnl_management_reward += 0.003
+                    elif pnl_trend > 0.05 and prev_pnl > 0:  # Was winning, bad to flip
+                        pnl_management_reward -= 0.008
+        
+        # === TRADITIONAL POSITIVE REWARDS (SIMPLIFIED) ===
+        positive_bonus = pnl_management_reward  # Start with PnL-aware rewards
         
         # Penalize excessive trading (overtrading)
         if hasattr(self, 'trade_streak') and self.trade_streak > 5:
@@ -1802,11 +2498,38 @@ class FuturesTradingEnv(gym.Env):
             trend_penalty + 
             volatility_penalty + 
             cost_penalty + 
-            special_penalty
+            special_penalty +
+            overtrading_penalty  # Include anti-overtrading penalty
         )
         
         # Apply dynamic loss multiplier
         total_penalty *= self.loss_penalty_multiplier
+        
+        # Add safety intervention penalties (teach agent not to attempt extreme actions)
+        safety_penalty = getattr(self, 'safety_intervention_penalty', 0.0)
+        extreme_leverage_penalty = getattr(self, 'extreme_leverage_penalty', 0.0)
+        position_state_penalty = getattr(self, 'position_state_penalty', 0.0)
+        zero_pnl_penalty = getattr(self, 'zero_pnl_prevention_penalty', 0.0)
+        dust_position_penalty = getattr(self, 'dust_position_penalty', 0.0)
+        
+        # Add new penalty categories for cleaner trading
+        phantom_trade_penalty = getattr(self, 'phantom_trade_penalty', 0.0)
+        invalid_entry_penalty = getattr(self, 'invalid_entry_penalty', 0.0)
+        zero_pnl_detection_penalty = getattr(self, 'zero_pnl_detection_penalty', 0.0)
+        zero_pnl_close_penalty = getattr(self, 'zero_pnl_close_penalty', 0.0)
+        excessive_modification_penalty = getattr(self, 'excessive_modification_penalty', 0.0)
+        fee_cap_penalty = getattr(self, 'fee_cap_penalty', 0.0)
+        entry_price_fallback_penalty = getattr(self, 'entry_price_fallback_penalty', 0.0)
+        critical_trade_block_penalty = getattr(self, 'critical_trade_block_penalty', 0.0)
+        
+        # Combine all penalty categories
+        all_penalty_categories = (
+            safety_penalty + extreme_leverage_penalty + position_state_penalty + zero_pnl_penalty + 
+            dust_position_penalty + phantom_trade_penalty + invalid_entry_penalty + 
+            zero_pnl_detection_penalty + zero_pnl_close_penalty + excessive_modification_penalty + 
+            fee_cap_penalty + entry_price_fallback_penalty + critical_trade_block_penalty
+        )
+        total_penalty += all_penalty_categories
         
         # Final reward calculation
         final_reward = base_reward + positive_bonus - total_penalty
@@ -1857,26 +2580,32 @@ class FuturesTradingEnv(gym.Env):
             recent_change = (self.balance_history[-1] - self.balance_history[-3]) / self.initial_equity
             balance_trend = np.clip(recent_change, -1.0, 1.0)
         
+        # Calculate PnL trend for observation
+        pnl_trend_feature = 0.0
+        if hasattr(self, 'unrealized_pnl_history') and len(self.unrealized_pnl_history) >= 3:
+            recent_pnl = np.mean(self.unrealized_pnl_history[-2:])
+            older_pnl = np.mean(self.unrealized_pnl_history[-3:-1])
+            if abs(older_pnl) > 0.01:
+                pnl_trend_feature = np.clip((recent_pnl - older_pnl) / abs(older_pnl), -1.0, 1.0)
+            else:
+                pnl_trend_feature = np.clip(recent_pnl - older_pnl, -100.0, 100.0) / 100.0
+        
+        # ENHANCED 9-FEATURE PORTFOLIO STATE (added PnL trend)
         portfolio_features = np.array([
-            # Core metrics
+            # Core state (4 essential features)
             equity_ratio,  # Current equity / initial equity
-            balance_ratio,  # Current balance / initial equity  
-            self.leverage / self.max_leverage if self.max_leverage > 0 else 0,  # Normalized leverage
-            
-            # PnL and position info
+            self.position_size / 2.0 if abs(self.position_size) < 2.0 else np.sign(self.position_size),  # Normalized position
             self.unrealized_pnl / self.initial_equity if self.initial_equity > 0 else 0,  # Normalized unrealized PnL
-            self.total_realized_pnl / self.initial_equity if self.initial_equity > 0 else 0,  # Normalized total realized PnL
+            drawdown,  # Current drawdown from peak
+            
+            # Risk & leverage (2 features)
+            self.leverage / self.max_leverage if self.max_leverage > 0 else 0,  # Normalized leverage
             self.margin_used / self.initial_equity if self.initial_equity > 0 else 0,  # Normalized margin used
             
-            # Risk metrics  
-            drawdown,  # Current drawdown from peak
-            self.balance_trend_slope,  # Balance trend (normalized slope)
-            balance_trend,  # Recent balance change
-            
-            # Trading behavior metrics
-            min(self.consecutive_losses / 10.0, 1.0),  # Normalized consecutive losses (cap at 10)
-            min(self.consecutive_wins / 10.0, 1.0),   # Normalized consecutive wins (cap at 10)
-            min(self.loss_penalty_multiplier / 3.0, 1.0),  # Normalized penalty multiplier
+            # Trading behavior & PnL trend (3 features)
+            min(self.consecutive_losses / 5.0, 1.0),  # Normalized consecutive losses (cap at 5)
+            balance_trend,  # Recent balance change trend
+            pnl_trend_feature,  # NEW: Unrealized PnL trend (-1 to +1)
         ], dtype=np.float32)
         
         # Ensure no NaN or inf values
@@ -1925,7 +2654,11 @@ class FuturesTradingEnv(gym.Env):
             'max_equity': self.max_equity,
             'drawdown': (self.max_equity - self.equity) / self.max_equity if self.max_equity > 0 else 0,
             'total_fees': self.total_fees,
-            'last_trade_pnl': self.last_trade_pnl
+            'last_trade_pnl': self.last_trade_pnl,
+            
+            # Safety intervention tracking
+            'safety_intervention_penalty': getattr(self, 'safety_intervention_penalty', 0.0),
+            'extreme_leverage_penalty': getattr(self, 'extreme_leverage_penalty', 0.0)
         }
     
     def render(self, mode='human'):

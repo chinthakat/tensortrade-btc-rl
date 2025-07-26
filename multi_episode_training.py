@@ -209,18 +209,26 @@ class EpisodeTracker:
 class MultiEpisodeTrainer:
     """Multi-episode training system with model persistence"""
     
-    def __init__(self, data_path: str, base_config: Dict, starting_model_path: Optional[str] = None):
+    def __init__(self, data_path: str, base_config: Dict, starting_model_path: Optional[str] = None, validation_pct: float = 0.05, use_simple_split: bool = True):
         self.data_path = data_path
         self.base_config = base_config
         self.starting_model_path = starting_model_path
+        self.validation_pct = validation_pct
+        self.use_simple_split = use_simple_split
         self.episode_tracker = EpisodeTracker()
         
         # Load data
         self.df = pd.read_csv(data_path)
         console.print(f"📊 Loaded data with {len(self.df)} rows")
         
-        # Split data for episodes (walk-forward style)
-        self.data_splits = self._create_data_splits()
+        # Clean and validate data
+        self._clean_and_validate_data()
+        
+        # Split data for episodes
+        self.data_splits = self._create_data_splits(
+            validation_pct=self.validation_pct, 
+            use_walk_forward=not self.use_simple_split
+        )
         
         # Training state
         self.current_episode = 0
@@ -231,8 +239,74 @@ class MultiEpisodeTrainer:
         if starting_model_path:
             console.print(f"🎯 Starting from model: {starting_model_path}")
     
-    def _create_data_splits(self, min_train_size: int = 10000, validation_size: int = 2000) -> List[Tuple[pd.DataFrame, pd.DataFrame]]:
-        """Create walk-forward data splits for episodes"""
+    def _clean_and_validate_data(self):
+        """Clean and validate the dataset, removing corrupted data"""
+        original_len = len(self.df)
+        
+        # Check for negative prices in any price column
+        price_columns = ['open', 'high', 'low', 'close']
+        
+        # Find the first row where any price goes negative
+        for col in price_columns:
+            if col in self.df.columns:
+                negative_mask = self.df[col] <= 0
+                if negative_mask.any():
+                    first_negative_idx = negative_mask.idxmax()
+                    console.print(f"⚠️  [yellow]Found negative/zero {col} prices starting at row {first_negative_idx}[/yellow]")
+                    
+                    # Truncate dataset before negative prices
+                    self.df = self.df.iloc[:first_negative_idx].copy()
+                    console.print(f"🔧 [cyan]Truncated dataset: {original_len} → {len(self.df)} rows[/cyan]")
+                    console.print(f"📉 [cyan]Removed {original_len - len(self.df)} corrupted rows with negative prices[/cyan]")
+                    break
+        
+        # Additional validation
+        if len(self.df) == 0:
+            raise ValueError("No valid data remaining after cleaning!")
+        
+        if len(self.df) < 1000:
+            console.print(f"[yellow]⚠️  Warning: Only {len(self.df)} rows remaining after cleaning[/yellow]")
+        
+        # Ensure timestamp column exists and is properly formatted
+        if 'timestamp' in self.df.columns:
+            try:
+                # Convert timestamp to datetime for validation
+                import pandas as pd
+                timestamps = pd.to_datetime(self.df['timestamp'], unit='s')
+                console.print(f"📅 Data range: {timestamps.iloc[0]} → {timestamps.iloc[-1]}")
+            except Exception as e:
+                console.print(f"[yellow]⚠️  Timestamp validation warning: {str(e)}[/yellow]")
+        
+        console.print(f"✅ [green]Data cleaning completed: {len(self.df)} valid rows[/green]")
+    
+    def _create_data_splits(self, validation_pct: float = 0.05, use_walk_forward: bool = False) -> List[Tuple[pd.DataFrame, pd.DataFrame]]:
+        """Create train/validation split - simple split (default) or walk-forward splits"""
+        
+        if use_walk_forward:
+            # Legacy walk-forward approach
+            return self._create_walk_forward_splits()
+        
+        # Simple approach: use last X% for validation
+        total_rows = len(self.df)
+        
+        # Calculate split point - use last X% for validation
+        val_size = int(total_rows * validation_pct)
+        train_size = total_rows - val_size
+        
+        # Create single split using majority for training, small portion for validation
+        train_data = self.df.iloc[:train_size].copy()
+        val_data = self.df.iloc[train_size:].copy()
+        
+        console.print(f"📊 Created simple train/validation split:")
+        console.print(f"   📈 Training data: {len(train_data):,} rows ({100*(1-validation_pct):.0f}%)")
+        console.print(f"   📋 Validation data: {len(val_data):,} rows ({validation_pct*100:.0f}%)")
+        console.print(f"   🎯 Training will use {len(train_data):,} rows instead of ~10,000!")
+        
+        # Return as single split for compatibility
+        return [(train_data, val_data)]
+    
+    def _create_walk_forward_splits(self, min_train_size: int = 10000, validation_size: int = 2000) -> List[Tuple[pd.DataFrame, pd.DataFrame]]:
+        """Create walk-forward data splits for episodes (legacy approach)"""
         splits = []
         total_rows = len(self.df)
         
@@ -249,7 +323,7 @@ class MultiEpisodeTrainer:
                 val_data = self.df.iloc[val_start:val_end].copy()
                 splits.append((train_data, val_data))
         
-        console.print(f"📈 Created {len(splits)} data splits for training episodes")
+        console.print(f"📈 Created {len(splits)} walk-forward data splits (legacy mode)")
         return splits
     
     def train_episode(
@@ -582,7 +656,10 @@ class MultiEpisodeTrainer:
         
         if self.best_model_path:
             console.print(f"\n🏆 [bold green]Best model: {self.best_model_path}[/bold green]")
-            console.print(f"📈 Best return: {self.best_performance['total_return_pct']:.2f}%")
+            if self.best_performance:
+                console.print(f"📈 Best return: {self.best_performance['total_return_pct']:.2f}%")
+            else:
+                console.print(f"📈 Performance: [yellow]Not evaluated yet[/yellow]")
             
             # Save the best model to the general models folder
             self._save_best_model_to_general_folder()
@@ -620,7 +697,10 @@ class MultiEpisodeTrainer:
             
             console.print(f"\n[bold green]✅ Best model saved to general models folder![/bold green]")
             console.print(f"📁 Saved as: [green]{new_filename}[/green]")
-            console.print(f"📊 Model performance: {self.best_performance['total_return_pct']:.2f}% return")
+            if self.best_performance:
+                console.print(f"📊 Model performance: {self.best_performance['total_return_pct']:.2f}% return")
+            else:
+                console.print(f"📊 Model performance: [yellow]Not evaluated yet[/yellow]")
             
             # Also update the best_model.zip (traditional location)
             best_model_path = models_dir / "best_model.zip"
@@ -631,30 +711,10 @@ class MultiEpisodeTrainer:
             console.print(f"[red]❌ Error saving best model to general folder: {str(e)}[/red]")
 
 def get_existing_models():
-    """Find all existing trained models"""
+    """Find all existing trained models, prioritizing important ones"""
     models = {}
     
-    # Search in episodes directory
-    episodes_dir = Path("episodes")
-    if episodes_dir.exists():
-        for episode_dir in episodes_dir.iterdir():
-            if episode_dir.is_dir():
-                models_dir = episode_dir / "models"
-                if models_dir.exists():
-                    for model_file in models_dir.glob("*.zip"):
-                        if model_file.name.startswith(("final_", "best_", "checkpoint_")):
-                            # Use relative path from episodes directory
-                            rel_path = str(model_file.relative_to(episodes_dir.parent))
-                            model_info = {
-                                'path': str(model_file.absolute()),
-                                'name': model_file.name,
-                                'episode': episode_dir.name,
-                                'size_mb': model_file.stat().st_size / 1024 / 1024,
-                                'modified': datetime.fromtimestamp(model_file.stat().st_mtime)
-                            }
-                            models[rel_path] = model_info
-    
-    # Search in models directory
+    # Search in models directory first (usually contains best models)
     models_dir = Path("models")
     if models_dir.exists():
         for model_file in models_dir.glob("*.zip"):
@@ -664,11 +724,91 @@ def get_existing_models():
                 'name': model_file.name,
                 'episode': 'models',
                 'size_mb': model_file.stat().st_size / 1024 / 1024,
-                'modified': datetime.fromtimestamp(model_file.stat().st_mtime)
+                'modified': datetime.fromtimestamp(model_file.stat().st_mtime),
+                'priority': 1  # High priority for models in main directory
             }
             models[rel_path] = model_info
     
-    return models
+    # Search in episodes directory - but only for important models
+    episodes_dir = Path("episodes")
+    if episodes_dir.exists():
+        for episode_dir in episodes_dir.iterdir():
+            if episode_dir.is_dir():
+                models_dir = episode_dir / "models"
+                if models_dir.exists():
+                    # Get all model files for this episode
+                    episode_models = list(models_dir.glob("*.zip"))
+                    
+                    # Priority 1: Final models (most important)
+                    final_models = [f for f in episode_models if f.name.startswith("final_")]
+                    for model_file in final_models:
+                        rel_path = str(model_file.relative_to(episodes_dir.parent))
+                        model_info = {
+                            'path': str(model_file.absolute()),
+                            'name': model_file.name,
+                            'episode': episode_dir.name,
+                            'size_mb': model_file.stat().st_size / 1024 / 1024,
+                            'modified': datetime.fromtimestamp(model_file.stat().st_mtime),
+                            'priority': 2  # High priority for final models
+                        }
+                        models[rel_path] = model_info
+                    
+                    # Priority 2: Interrupted models (if no final model exists)
+                    if not final_models:
+                        interrupted_models = [f for f in episode_models if f.name.startswith("interrupted_")]
+                        for model_file in interrupted_models:
+                            rel_path = str(model_file.relative_to(episodes_dir.parent))
+                            model_info = {
+                                'path': str(model_file.absolute()),
+                                'name': model_file.name,
+                                'episode': episode_dir.name,
+                                'size_mb': model_file.stat().st_size / 1024 / 1024,
+                                'modified': datetime.fromtimestamp(model_file.stat().st_mtime),
+                                'priority': 3  # Medium priority for interrupted models
+                            }
+                            models[rel_path] = model_info
+                    
+                    # Priority 3: Only the latest checkpoint per episode (fallback)
+                    checkpoint_models = [f for f in episode_models if f.name.startswith("checkpoint_")]
+                    if checkpoint_models and not final_models:
+                        # Get the most recent checkpoint only
+                        latest_checkpoint = max(checkpoint_models, key=lambda f: f.stat().st_mtime)
+                        rel_path = str(latest_checkpoint.relative_to(episodes_dir.parent))
+                        model_info = {
+                            'path': str(latest_checkpoint.absolute()),
+                            'name': latest_checkpoint.name,
+                            'episode': episode_dir.name,
+                            'size_mb': latest_checkpoint.stat().st_size / 1024 / 1024,
+                            'modified': datetime.fromtimestamp(latest_checkpoint.stat().st_mtime),
+                            'priority': 4  # Lower priority for checkpoints
+                        }
+                        models[rel_path] = model_info
+    
+    # Filter and sort models by priority and recency
+    important_models = {}
+    
+    # Always include models from main models directory
+    for path, info in models.items():
+        if info['priority'] == 1:  # Models directory
+            important_models[path] = info
+    
+    # Include final models from episodes
+    for path, info in models.items():
+        if info['priority'] == 2:  # Final models
+            important_models[path] = info
+    
+    # If we have fewer than 8 important models, add some others
+    if len(important_models) < 8:
+        remaining_models = [(path, info) for path, info in models.items() 
+                           if path not in important_models]
+        # Sort by priority (lower is better) then by modification time (newer first)
+        remaining_models.sort(key=lambda x: (x[1]['priority'], -x[1]['modified'].timestamp()))
+        
+        # Add up to fill 8 slots total
+        for path, info in remaining_models[:8 - len(important_models)]:
+            important_models[path] = info
+    
+    return important_models
 
 def cleanup_all_models():
     """Completely clean up ALL models from both episodes and models directories"""
@@ -789,33 +929,61 @@ def setup_multi_episode_training():
     if existing_models:
         console.print("\n[cyan]Found existing models:[/cyan]")
         
-        # Display existing models
-        model_table = Table(title="Available Models")
+        # Display existing models with improved formatting
+        model_table = Table(title="Important Available Models")
         model_table.add_column("Index", style="cyan", no_wrap=True)
         model_table.add_column("Model Name", style="green")
-        model_table.add_column("Episode/Location", style="yellow")
-        model_table.add_column("Size (MB)", style="blue")
-        model_table.add_column("Modified", style="magenta")
+        model_table.add_column("Type", style="yellow")
+        model_table.add_column("Episode/Location", style="blue")
+        model_table.add_column("Size (MB)", style="magenta")
+        model_table.add_column("Modified", style="white")
         
+        # Sort models by priority (lower is better) and modification time (newer first)
         model_list = list(existing_models.items())
+        model_list.sort(key=lambda x: (x[1]['priority'], -x[1]['modified'].timestamp()))
         
         # Add "Create New Model" option
-        model_table.add_row("0", "[bold]🆕 Create New Model[/bold]", "New Training", "-", "-")
+        model_table.add_row("0", "[bold]🆕 Create New Model[/bold]", "New", "New Training", "-", "-")
         
         for i, (rel_path, info) in enumerate(model_list):
+            # Determine model type for display
+            if "best_" in info['name'] or info['episode'] == 'models':
+                model_type = "🏆 Best"
+            elif "final_" in info['name']:
+                model_type = "✅ Final"
+            elif "interrupted_" in info['name']:
+                model_type = "⚠️ Interrupted"
+            elif "checkpoint_" in info['name']:
+                model_type = "📝 Checkpoint"
+            else:
+                model_type = "📦 Model"
+            
+            # Truncate long model names for better display
+            display_name = info['name']
+            if len(display_name) > 45:
+                display_name = display_name[:42] + "..."
+            
             model_table.add_row(
                 str(i+1),
-                info['name'],
+                display_name,
+                model_type,
                 info['episode'],
                 f"{info['size_mb']:.1f}",
-                info['modified'].strftime("%Y-%m-%d %H:%M")
+                info['modified'].strftime("%m-%d %H:%M")
             )
         
         # Add cleanup option at the bottom
         cleanup_index = len(model_list) + 1
-        model_table.add_row(str(cleanup_index), "[bold red]🗑️ CLEANUP ALL MODELS[/bold red]", "Delete Everything", "-", "-")
+        model_table.add_row(str(cleanup_index), "[bold red]🗑️ CLEANUP ALL MODELS[/bold red]", "🗑️ Delete", "Delete Everything", "-", "-")
         
         console.print(model_table)
+        
+        # Show helpful info about model types
+        console.print("\n[dim]Model Types:[/dim]")
+        console.print("[dim]🏆 Best = Highest performing models[/dim]")
+        console.print("[dim]✅ Final = Completed episode models[/dim]")
+        console.print("[dim]⚠️ Interrupted = Partially trained models[/dim]")
+        console.print("[dim]📝 Checkpoint = Latest checkpoint per episode[/dim]")
         
         model_choice = IntPrompt.ask(
             f"Select model (0 = new, 1-{len(model_list)} = existing, {cleanup_index} = cleanup all)", 
@@ -860,9 +1028,24 @@ def setup_multi_episode_training():
         
         starting_model_path = None
     
+    # Data configuration
+    console.print("\n[bold]📊 Data Split Configuration[/bold]")
+    console.print("Choose validation approach:")
+    console.print("1. 🎯 Simple split - Use last 5% for validation (RECOMMENDED)")
+    console.print("2. 📈 Walk-forward splits - Multiple small training datasets")
+    
+    split_choice = IntPrompt.ask("Select data split approach", default=1)
+    
+    if split_choice == 1:
+        validation_pct = FloatPrompt.ask("Validation percentage (0.05 = 5%)", default=0.05)
+        use_simple_split = True
+    else:
+        validation_pct = 0.05  # Default for walk-forward
+        use_simple_split = False
+    
     # Training configuration
-    num_episodes = IntPrompt.ask("Number of episodes to train", default=5)
-    timesteps_per_episode = IntPrompt.ask("Timesteps per episode", default=500000)
+    num_episodes = IntPrompt.ask("Number of episodes to train", default=1)
+    timesteps_per_episode = IntPrompt.ask("Timesteps per episode", default=50000)
     
     # Model architecture selection
     architectures = ["cnn_lstm", "attention_cnn_lstm", "resnet_lstm"]
@@ -870,11 +1053,11 @@ def setup_multi_episode_training():
     for i, arch in enumerate(architectures):
         console.print(f"{i+1}. {arch}")
     
-    arch_choice = IntPrompt.ask("Select architecture", default=1)
+    arch_choice = IntPrompt.ask("Select architecture", default=2)
     if 1 <= arch_choice <= len(architectures):
         model_architecture = architectures[arch_choice-1]
     else:
-        model_architecture = "cnn_lstm"
+        model_architecture = "attention_cnn_lstm"
     
     # Algorithm selection
     algorithms = ["ppo", "a2c", "sac"]
@@ -892,18 +1075,25 @@ def setup_multi_episode_training():
     base_config = {
         "training_params": {
             "initial_equity": FloatPrompt.ask("Initial equity", default=10000.0),
-            "max_leverage": FloatPrompt.ask("Max leverage", default=25.0),
-            "window_size": IntPrompt.ask("Window size", default=60),
+            "max_leverage": FloatPrompt.ask("Max leverage", default=10.0),
+            "window_size": IntPrompt.ask("Window size", default=20),
             "stop_loss_pct": FloatPrompt.ask("Stop loss %", default=0.02),
             "take_profit_pct": FloatPrompt.ask("Take profit %", default=0.04),
+            "max_risk_per_trade": FloatPrompt.ask("Max risk per trade (0.02 = 2%)", default=0.02),
             "maintenance_margin_rate": FloatPrompt.ask("Maintenance margin rate (0.004 = 0.4%)", default=0.004),
             "liquidation_fee_rate": FloatPrompt.ask("Liquidation fee rate (0.005 = 0.5%)", default=0.005),
-            "n_envs": IntPrompt.ask("Parallel environments", default=4)
+            "n_envs": IntPrompt.ask("Parallel environments", default=1)
         }
     }
     
     # Create and run trainer
-    trainer = MultiEpisodeTrainer(data_path, base_config, starting_model_path=starting_model_path)
+    trainer = MultiEpisodeTrainer(
+        data_path, 
+        base_config, 
+        starting_model_path=starting_model_path,
+        validation_pct=validation_pct,
+        use_simple_split=use_simple_split
+    )
     trainer.run_multi_episode_training(
         num_episodes=num_episodes,
         model_architecture=model_architecture,
