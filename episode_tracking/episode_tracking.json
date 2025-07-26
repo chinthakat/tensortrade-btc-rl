@@ -1019,6 +1019,18 @@
       "completed": true,
       "model_path": "episodes/episode_05_20250726_014614/models/final_model_episode_05_20250726_014614.zip",
       "timestamp": "2025-07-26T01:51:12.586397"
+    },
+    {
+      "episode_id": "episode_01_20250726_095728",
+      "episode_number": 1,
+      "total_timesteps": 50000,
+      "model_architecture": "attention_cnn_lstm",
+      "algorithm": "ppo",
+      "train_data_size": 10000,
+      "val_data_size": 2000,
+      "completed": true,
+      "model_path": "episodes/episode_01_20250726_095728/models/final_model_episode_01_20250726_095728.zip",
+      "timestamp": "2025-07-26T10:02:07.517322"
     }
   ],
   "performance_history": [

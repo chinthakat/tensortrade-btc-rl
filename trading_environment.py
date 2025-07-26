@@ -298,7 +298,7 @@ class FuturesTradingEnv(gym.Env):
         maker_fee: float = 0.0002,  # 0.02%
         taker_fee: float = 0.0004,  # 0.04%
         funding_rate: float = 0.0001,  # 0.01% per 8 hours
-        window_size: int = 20,  # Reduced from 60 to 20 for simplified approach
+        window_size: int = 60,  # IMPROVED: Increased from 20 to 60 to align with indicator buffer requirements
         stop_loss_pct: float = 0.02,  # 2% - fallback for fixed mode
         take_profit_pct: float = 0.04,  # 4% - fallback for fixed mode
         # Dynamic Stop-Loss and Take-Profit Configuration
@@ -309,6 +309,8 @@ class FuturesTradingEnv(gym.Env):
         max_stop_loss_pct: float = 0.08,  # 8% maximum stop-loss
         min_take_profit_pct: float = 0.01,  # 1% minimum take-profit
         max_take_profit_pct: float = 0.15,  # 15% maximum take-profit
+        # Risk Management Configuration
+        max_risk_per_trade: float = 0.02,  # CONFIGURABLE: Maximum 2% risk per trade (was hardcoded)
         log_file: str = None,
         training_iteration: int = 0,
         training_split_ratio: float = 0.7,  # Use 70% of data for scaler fitting
@@ -344,6 +346,9 @@ class FuturesTradingEnv(gym.Env):
         self.training_iteration = training_iteration
         self.training_split_ratio = training_split_ratio
         self.training_end_idx = training_end_idx
+        
+        # Risk management configuration
+        self.max_risk_per_trade = max_risk_per_trade  # Store configurable risk parameter
         
         # Liquidation parameters
         self.maintenance_margin_rate = maintenance_margin_rate
@@ -719,8 +724,14 @@ class FuturesTradingEnv(gym.Env):
         super().reset(seed=seed)
         
         # Calculate safe starting point - ensure technical indicators are stable
-        # Use max of window_size and a minimum buffer for technical indicators
-        min_buffer_for_indicators = max(60, self.window_size)  # At least 60 steps for indicators to stabilize
+        # IMPROVED: Use window_size consistently to avoid padded data at episode start
+        # Technical indicators need time to stabilize, so we ensure minimum buffer equals window_size
+        min_buffer_for_indicators = max(self.window_size, 60)  # Use the larger of window_size or 60 for stability
+        
+        # CONSISTENCY FIX: If window_size < 60, we should increase it rather than start with padded data
+        if self.window_size < min_buffer_for_indicators:
+            episode_logger.warning(f"Window size ({self.window_size}) is smaller than minimum buffer ({min_buffer_for_indicators}). "
+                                 f"This may cause padded observations at episode start.")
         
         # Trading state
         self.current_step = min_buffer_for_indicators
@@ -959,12 +970,12 @@ class FuturesTradingEnv(gym.Env):
             if current_low <= 0:
                 current_low = current_price
         
-        # Update unrealized PnL
+        # Update unrealized PnL - FIXED: Use abs(position_size) for correct short position calculations
         if self.position_size != 0:
             if self.position_side == 1:  # Long
-                self.unrealized_pnl = self.position_size * (current_price - self.entry_price)
+                self.unrealized_pnl = abs(self.position_size) * (current_price - self.entry_price)
             else:  # Short
-                self.unrealized_pnl = self.position_size * (self.entry_price - current_price)
+                self.unrealized_pnl = abs(self.position_size) * (self.entry_price - current_price)
         else:
             self.unrealized_pnl = 0.0
         
@@ -988,11 +999,11 @@ class FuturesTradingEnv(gym.Env):
                     # Get current price for logging
                     current_price = self._safe_get_price_data(self.current_step, 'close')
                     
-                    # Calculate PnL for the cancelled position
+                    # Calculate PnL for the cancelled position - FIXED: Use abs(position_size) for correct short calculations
                     if self.position_side == 1:  # Long
-                        pnl = self.position_size * (current_price - self.entry_price)
+                        pnl = abs(self.position_size) * (current_price - self.entry_price)
                     else:  # Short
-                        pnl = self.position_size * (self.entry_price - current_price)
+                        pnl = abs(self.position_size) * (self.entry_price - current_price)
                     
                     # Update balance (minimal fees for CANCEL)
                     cancel_fee = abs(self.position_size * current_price) * (self.taker_fee * 0.5)  # Reduced fee
@@ -1160,9 +1171,15 @@ class FuturesTradingEnv(gym.Env):
         if not is_valid:
             logging.error(f"PRICE_VALIDATION_FAILED during trade execution: {validation_details}")
         
-        # Enhanced risk controls
-        max_risk_per_trade = 0.02  # Maximum 2% risk per trade
-        risk_percentage = min(risk_percentage, max_risk_per_trade)
+        # IMPROVED: Scale risk percentage to meaningful range instead of hard clamping
+        # This helps the agent learn more efficiently by mapping its output to actual useful values
+        # Use configurable max_risk_per_trade instead of hardcoded value
+        
+        # Scale risk from agent's [0,1] output to [0, max_risk_per_trade] range
+        # This way, agent learns to use the full range meaningfully
+        if risk_percentage > 1.0:
+            risk_percentage = 1.0  # Cap at 100% if agent outputs higher
+        risk_percentage = risk_percentage * self.max_risk_per_trade  # Scale to 0-max_risk% range
         
         # Limit leverage based on current equity ratio
         equity_ratio = self.equity / self.initial_equity
@@ -1362,11 +1379,11 @@ class FuturesTradingEnv(gym.Env):
             
             # We're modifying an existing position
             if np.sign(target_position_size) != np.sign(self.position_size):
-                # Position flip: calculate PnL on the closed portion
+                # Position flip: calculate PnL on the closed portion - FIXED: Use abs(position_size) for correct short calculations
                 if self.position_side == 1:  # Closing long
-                    realized_pnl = self.position_size * (current_price - self.entry_price)
+                    realized_pnl = abs(self.position_size) * (current_price - self.entry_price)
                 else:  # Closing short
-                    realized_pnl = self.position_size * (self.entry_price - current_price)
+                    realized_pnl = abs(self.position_size) * (self.entry_price - current_price)
                 
                 # ZERO PnL PREVENTION: Validate calculated PnL makes sense
                 if abs(realized_pnl) < 0.001 and abs(current_price - self.entry_price) > 0.001:
@@ -1512,8 +1529,8 @@ class FuturesTradingEnv(gym.Env):
                         'close_datetime': self.df.iloc[self.current_step]['timestamp'] if self.current_step < len(self.df) else f"step_{self.current_step}",
                         'side': 'FLAT',
                         'entry_action': close_action_type,
-                        'entry_price': getattr(self, 'entry_price', current_price),
-                        'close_price': current_price,
+                        'entry_price': round(self.trade_entry_price or self.entry_price, 4),  # FIXED: Use stored trade entry price for consistency
+                        'close_price': round(current_price, 4),
                         'net_pnl': realized_pnl,
                         'close_reward': 0,
                         'entry_net_worth': getattr(self, 'entry_equity', self.equity),  # Use stored entry equity
@@ -1521,7 +1538,7 @@ class FuturesTradingEnv(gym.Env):
                         'trade_duration_hours': close_duration_hours,
                         'status': 'CLOSED',
                         'win_loss': 'WIN' if realized_pnl > 0 else 'LOSS' if realized_pnl < 0 else 'NEUTRAL',
-                        'position_size': 0.0,  # Position is closed
+                        'position_size': abs(old_position_size),  # FIXED: Log actual closed position size instead of 0.0
                         'fees_paid': trading_fee * 0.5,  # Split fee between close and open
                         'stop_loss_price': '',
                         'take_profit_price': '',
@@ -1887,137 +1904,8 @@ class FuturesTradingEnv(gym.Env):
         # For compatibility, just call the efficient method
         self._execute_efficient_trade(target_position_size, current_price)
     
-    def _close_position(self, current_price: float, reason: str):
-        """Close current position"""
-        if self.position_size == 0:
-            return
-        
-        # Validate that current_price is not zero
-        if current_price <= 0:
-            logging.error(f"ZERO_PRICE_DETECTED in _close_position: current_price={current_price} at step {self.current_step}")
-            # Get a valid price from the last available data
-            current_price = self._safe_get_price_data(self.current_step, 'close')
-            episode_logger.info(f"PRICE_CORRECTED in _close_position: Using price={current_price} instead")
-        
-        # Validate closing price against market data
-        market_price = self._safe_get_price_data(self.current_step, 'close')
-        timestamp = self._safe_get_price_data(self.current_step, 'timestamp', 0)
-        
-        is_valid, validation_details = self.price_validator.validate_price(
-            trade_price=current_price,
-            market_price=market_price,
-            timestamp=timestamp,
-            step=self.current_step,
-            context="POSITION_CLOSE"
-        )
-        
-        if not is_valid:
-            logging.error(f"PRICE_VALIDATION_FAILED during position close: {validation_details}")
-        
-        # Calculate PnL
-        if self.position_side == 1:  # Long
-            pnl = self.position_size * (current_price - self.entry_price)
-        else:  # Short
-            pnl = self.position_size * (self.entry_price - current_price)
-        
-        # ZERO PnL PREVENTION: Validate PnL calculation in position close
-        if abs(pnl) < 0.001 and abs(current_price - self.entry_price) > 0.001:
-            logging.debug(f"ZERO_PNL_CLOSE_DETECTED: PnL={pnl:.6f} despite price movement from {self.entry_price} to {current_price}")
-            # Apply penalty for zero PnL close detection
-            if not hasattr(self, 'zero_pnl_close_penalty'):
-                self.zero_pnl_close_penalty = 0.0
-            self.zero_pnl_close_penalty += 0.025  # Penalty for zero PnL close anomaly
-            penalty_logger.error(f"ZERO_PNL_CLOSE_PENALTY: PnL={pnl:.6f}, price_move={abs(current_price - self.entry_price):.6f}, penalty=0.025")
-            # Continue with close but flag for investigation
-        
-        # Additional validation: prevent closing with invalid entry price
-        if self.entry_price <= 0:
-            logging.debug(f"INVALID_ENTRY_PRICE_CLOSE: entry_price={self.entry_price}, using current_price as fallback")
-            # Apply penalty for invalid entry price
-            if not hasattr(self, 'invalid_entry_penalty'):
-                self.invalid_entry_penalty = 0.0
-            self.invalid_entry_penalty += 0.03  # Penalty for invalid entry price
-            penalty_logger.error(f"INVALID_ENTRY_PRICE_PENALTY: entry_price={self.entry_price}, penalty=0.03")
-            self.entry_price = current_price
-            pnl = 0.0  # No PnL if entry price was invalid
-        
-        # Calculate fees with safety cap
-        trade_value = abs(self.position_size * current_price)
-        base_exit_fee = trade_value * self.taker_fee
-        
-        # EMERGENCY FEE CAP: Prevent unrealistic fees (same as main trading logic)
-        max_reasonable_fee = trade_value * 0.01  # 1% maximum fee rate
-        exit_fee = min(base_exit_fee, max_reasonable_fee)
-        
-        # Log when fee cap is applied for debugging
-        if exit_fee < base_exit_fee:
-            print(f"WARNING: Step {self.current_step}: Exit fee capped from ${base_exit_fee:.2f} to ${exit_fee:.2f} on trade value ${trade_value:.2f}")
-        
-        # Update balance
-        self.balance += pnl - exit_fee
-        self.total_fees += exit_fee
-        self.total_realized_pnl += pnl
-        self.last_trade_pnl = pnl
-        
-        # Update consecutive loss/win tracking
-        if pnl > 0:
-            self.consecutive_wins += 1
-            self.consecutive_losses = 0
-        else:
-            self.consecutive_losses += 1
-            self.consecutive_wins = 0
-            
-            # Increase penalty multiplier for consecutive losses
-            if self.consecutive_losses >= self.consecutive_loss_threshold:
-                self.loss_penalty_multiplier = min(3.0, 1.0 + (self.consecutive_losses - self.consecutive_loss_threshold) * 0.2)
-        
-        # Calculate funding costs (simplified)
-        if self.trade_start_step:
-            hours_held = (self.current_step - self.trade_start_step) * 0.25  # 15min intervals
-            funding_periods = int(hours_held / 8)  # Funding every 8 hours
-            funding_cost = abs(self.position_size * self.entry_price) * self.funding_rate * funding_periods
-            if self.position_side == -1:  # Short positions typically pay funding
-                self.balance -= funding_cost
-                self.total_funding_costs += funding_cost
-        
-        # CRITICAL FIX: Prevent duplicate trade logging
-        # Only log if this is a real position close (not already logged by efficient system)
-        if self.logger and not getattr(self, '_efficient_trade_logged', False):
-            # Additional validation: only log if we actually had a meaningful position
-            if abs(self.position_size) > 0.001 and self.trade_start_step:
-                self._log_trade(current_price, pnl, reason)
-            else:
-                logging.debug(f"PHANTOM_TRADE_PREVENTED: Skipping log for position_size={self.position_size:.6f}, trade_start_step={self.trade_start_step}")
-                # Apply penalty for phantom trade attempts
-                if not hasattr(self, 'phantom_trade_penalty'):
-                    self.phantom_trade_penalty = 0.0
-                self.phantom_trade_penalty += 0.02  # Penalty for phantom trades
-                penalty_logger.error(f"PHANTOM_TRADE_PENALTY: position_size={self.position_size:.6f}, penalty=0.02")
-        
-        # Reset the efficient trade logging flag
-        self._efficient_trade_logged = False
-        
-        # Reset position
-        self.position_size = 0.0
-        self.position_side = 0
-        self.entry_price = 0.0
-        self.trade_entry_price = 0.0  # Reset trade entry price
-        self.margin_used = 0.0
-        self.unrealized_pnl = 0.0
-        self.leverage = 0.0
-        self.stop_loss_price = None
-        self.take_profit_price = None
-        self.liquidation_price = None
-        
-        # POSITION STATE VALIDATION: Ensure position is properly closed
-        self._validate_and_fix_position_state()
-        
-        # Reset trade reward accumulation
-        self.current_trade_reward = 0.0
-        
-        # Update episode stats
-        # Note: episode_trades is now counted in _execute_efficient_trade
-        self.episode_profit += pnl
+    # REMOVED: _close_position method (legacy code)
+    # This method was unused - all trade closures now go through _execute_efficient_trade() for consistency
     
     def _force_close_position_no_fees(self, current_price: float, reason: str):
         """
@@ -2032,10 +1920,11 @@ class FuturesTradingEnv(gym.Env):
             current_price = self._safe_get_price_data(self.current_step, 'close')
         
         # Calculate PnL without fees
+        # Calculate PnL for forced closure - FIXED: Use abs(position_size) for correct short calculations  
         if self.position_side == 1:  # Long
-            pnl = self.position_size * (current_price - self.entry_price)
+            pnl = abs(self.position_size) * (current_price - self.entry_price)
         else:  # Short
-            pnl = self.position_size * (self.entry_price - current_price)
+            pnl = abs(self.position_size) * (self.entry_price - current_price)
         
         # Update balance with PnL only (NO FEES for episode cleanup)
         self.balance += pnl
@@ -2224,13 +2113,13 @@ class FuturesTradingEnv(gym.Env):
         Returns:
             Current margin balance
         """
-        # Calculate unrealized PnL at mark price
+        # Calculate unrealized PnL at mark price - FIXED: Use abs(position_size) for correct short calculations
         if self.position_size == 0:
             unrealized_pnl = 0.0
         elif self.position_side == 1:  # Long
-            unrealized_pnl = self.position_size * (mark_price - self.entry_price)
+            unrealized_pnl = abs(self.position_size) * (mark_price - self.entry_price)
         else:  # Short
-            unrealized_pnl = self.position_size * (self.entry_price - mark_price)
+            unrealized_pnl = abs(self.position_size) * (self.entry_price - mark_price)
         
         return self.balance + unrealized_pnl
     
