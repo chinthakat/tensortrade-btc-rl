@@ -209,18 +209,26 @@ class EpisodeTracker:
 class MultiEpisodeTrainer:
     """Multi-episode training system with model persistence"""
     
-    def __init__(self, data_path: str, base_config: Dict, starting_model_path: Optional[str] = None):
+    def __init__(self, data_path: str, base_config: Dict, starting_model_path: Optional[str] = None, validation_pct: float = 0.05, use_simple_split: bool = True):
         self.data_path = data_path
         self.base_config = base_config
         self.starting_model_path = starting_model_path
+        self.validation_pct = validation_pct
+        self.use_simple_split = use_simple_split
         self.episode_tracker = EpisodeTracker()
         
         # Load data
         self.df = pd.read_csv(data_path)
         console.print(f"📊 Loaded data with {len(self.df)} rows")
         
-        # Split data for episodes (walk-forward style)
-        self.data_splits = self._create_data_splits()
+        # Clean and validate data
+        self._clean_and_validate_data()
+        
+        # Split data for episodes
+        self.data_splits = self._create_data_splits(
+            validation_pct=self.validation_pct, 
+            use_walk_forward=not self.use_simple_split
+        )
         
         # Training state
         self.current_episode = 0
@@ -231,8 +239,74 @@ class MultiEpisodeTrainer:
         if starting_model_path:
             console.print(f"🎯 Starting from model: {starting_model_path}")
     
-    def _create_data_splits(self, min_train_size: int = 10000, validation_size: int = 2000) -> List[Tuple[pd.DataFrame, pd.DataFrame]]:
-        """Create walk-forward data splits for episodes"""
+    def _clean_and_validate_data(self):
+        """Clean and validate the dataset, removing corrupted data"""
+        original_len = len(self.df)
+        
+        # Check for negative prices in any price column
+        price_columns = ['open', 'high', 'low', 'close']
+        
+        # Find the first row where any price goes negative
+        for col in price_columns:
+            if col in self.df.columns:
+                negative_mask = self.df[col] <= 0
+                if negative_mask.any():
+                    first_negative_idx = negative_mask.idxmax()
+                    console.print(f"⚠️  [yellow]Found negative/zero {col} prices starting at row {first_negative_idx}[/yellow]")
+                    
+                    # Truncate dataset before negative prices
+                    self.df = self.df.iloc[:first_negative_idx].copy()
+                    console.print(f"🔧 [cyan]Truncated dataset: {original_len} → {len(self.df)} rows[/cyan]")
+                    console.print(f"📉 [cyan]Removed {original_len - len(self.df)} corrupted rows with negative prices[/cyan]")
+                    break
+        
+        # Additional validation
+        if len(self.df) == 0:
+            raise ValueError("No valid data remaining after cleaning!")
+        
+        if len(self.df) < 1000:
+            console.print(f"[yellow]⚠️  Warning: Only {len(self.df)} rows remaining after cleaning[/yellow]")
+        
+        # Ensure timestamp column exists and is properly formatted
+        if 'timestamp' in self.df.columns:
+            try:
+                # Convert timestamp to datetime for validation
+                import pandas as pd
+                timestamps = pd.to_datetime(self.df['timestamp'], unit='s')
+                console.print(f"📅 Data range: {timestamps.iloc[0]} → {timestamps.iloc[-1]}")
+            except Exception as e:
+                console.print(f"[yellow]⚠️  Timestamp validation warning: {str(e)}[/yellow]")
+        
+        console.print(f"✅ [green]Data cleaning completed: {len(self.df)} valid rows[/green]")
+    
+    def _create_data_splits(self, validation_pct: float = 0.05, use_walk_forward: bool = False) -> List[Tuple[pd.DataFrame, pd.DataFrame]]:
+        """Create train/validation split - simple split (default) or walk-forward splits"""
+        
+        if use_walk_forward:
+            # Legacy walk-forward approach
+            return self._create_walk_forward_splits()
+        
+        # Simple approach: use last X% for validation
+        total_rows = len(self.df)
+        
+        # Calculate split point - use last X% for validation
+        val_size = int(total_rows * validation_pct)
+        train_size = total_rows - val_size
+        
+        # Create single split using majority for training, small portion for validation
+        train_data = self.df.iloc[:train_size].copy()
+        val_data = self.df.iloc[train_size:].copy()
+        
+        console.print(f"📊 Created simple train/validation split:")
+        console.print(f"   📈 Training data: {len(train_data):,} rows ({100*(1-validation_pct):.0f}%)")
+        console.print(f"   📋 Validation data: {len(val_data):,} rows ({validation_pct*100:.0f}%)")
+        console.print(f"   🎯 Training will use {len(train_data):,} rows instead of ~10,000!")
+        
+        # Return as single split for compatibility
+        return [(train_data, val_data)]
+    
+    def _create_walk_forward_splits(self, min_train_size: int = 10000, validation_size: int = 2000) -> List[Tuple[pd.DataFrame, pd.DataFrame]]:
+        """Create walk-forward data splits for episodes (legacy approach)"""
         splits = []
         total_rows = len(self.df)
         
@@ -249,7 +323,7 @@ class MultiEpisodeTrainer:
                 val_data = self.df.iloc[val_start:val_end].copy()
                 splits.append((train_data, val_data))
         
-        console.print(f"📈 Created {len(splits)} data splits for training episodes")
+        console.print(f"📈 Created {len(splits)} walk-forward data splits (legacy mode)")
         return splits
     
     def train_episode(
@@ -954,6 +1028,21 @@ def setup_multi_episode_training():
         
         starting_model_path = None
     
+    # Data configuration
+    console.print("\n[bold]📊 Data Split Configuration[/bold]")
+    console.print("Choose validation approach:")
+    console.print("1. 🎯 Simple split - Use last 5% for validation (RECOMMENDED)")
+    console.print("2. 📈 Walk-forward splits - Multiple small training datasets")
+    
+    split_choice = IntPrompt.ask("Select data split approach", default=1)
+    
+    if split_choice == 1:
+        validation_pct = FloatPrompt.ask("Validation percentage (0.05 = 5%)", default=0.05)
+        use_simple_split = True
+    else:
+        validation_pct = 0.05  # Default for walk-forward
+        use_simple_split = False
+    
     # Training configuration
     num_episodes = IntPrompt.ask("Number of episodes to train", default=1)
     timesteps_per_episode = IntPrompt.ask("Timesteps per episode", default=50000)
@@ -998,7 +1087,13 @@ def setup_multi_episode_training():
     }
     
     # Create and run trainer
-    trainer = MultiEpisodeTrainer(data_path, base_config, starting_model_path=starting_model_path)
+    trainer = MultiEpisodeTrainer(
+        data_path, 
+        base_config, 
+        starting_model_path=starting_model_path,
+        validation_pct=validation_pct,
+        use_simple_split=use_simple_split
+    )
     trainer.run_multi_episode_training(
         num_episodes=num_episodes,
         model_architecture=model_architecture,

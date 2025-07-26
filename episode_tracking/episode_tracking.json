@@ -1031,6 +1031,66 @@
       "completed": true,
       "model_path": "episodes/episode_01_20250726_095728/models/final_model_episode_01_20250726_095728.zip",
       "timestamp": "2025-07-26T10:02:07.517322"
+    },
+    {
+      "episode_id": "episode_01_20250726_100807",
+      "episode_number": 1,
+      "total_timesteps": 50000,
+      "model_architecture": "attention_cnn_lstm",
+      "algorithm": "ppo",
+      "train_data_size": 10000,
+      "val_data_size": 2000,
+      "completed": true,
+      "model_path": "episodes/episode_01_20250726_100807/models/final_model_episode_01_20250726_100807.zip",
+      "timestamp": "2025-07-26T10:12:44.263649"
+    },
+    {
+      "episode_id": "episode_01_20250726_105337",
+      "episode_number": 1,
+      "total_timesteps": 50000,
+      "model_architecture": "attention_cnn_lstm",
+      "algorithm": "ppo",
+      "train_data_size": 33288,
+      "val_data_size": 1752,
+      "completed": true,
+      "model_path": "episodes/episode_01_20250726_105337/models/final_model_episode_01_20250726_105337.zip",
+      "timestamp": "2025-07-26T10:58:18.115438"
+    },
+    {
+      "episode_id": "episode_01_20250726_112710",
+      "episode_number": 1,
+      "total_timesteps": 50000,
+      "model_architecture": "attention_cnn_lstm",
+      "algorithm": "ppo",
+      "train_data_size": 49887,
+      "val_data_size": 2625,
+      "completed": true,
+      "model_path": "episodes/episode_01_20250726_112710/models/final_model_episode_01_20250726_112710.zip",
+      "timestamp": "2025-07-26T11:31:54.226551"
+    },
+    {
+      "episode_id": "episode_01_20250726_122031",
+      "episode_number": 1,
+      "total_timesteps": 50000,
+      "model_architecture": "attention_cnn_lstm",
+      "algorithm": "ppo",
+      "train_data_size": 49887,
+      "val_data_size": 2625,
+      "completed": true,
+      "model_path": "episodes/episode_01_20250726_122031/models/final_model_episode_01_20250726_122031.zip",
+      "timestamp": "2025-07-26T12:25:27.445814"
+    },
+    {
+      "episode_id": "episode_01_20250726_122614",
+      "episode_number": 1,
+      "total_timesteps": 50000,
+      "model_architecture": "attention_cnn_lstm",
+      "algorithm": "ppo",
+      "train_data_size": 49887,
+      "val_data_size": 2625,
+      "completed": true,
+      "model_path": "episodes/episode_01_20250726_122614/models/final_model_episode_01_20250726_122614.zip",
+      "timestamp": "2025-07-26T12:31:28.043783"
     }
   ],
   "performance_history": [
