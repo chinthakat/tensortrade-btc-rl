@@ -2490,6 +2490,67 @@ class FuturesTradingEnv(gym.Env):
                 positive_bonus += min(recent_improvement * self.reward_config['recovery_multiplier'], 
                                     self.reward_config['recovery_bonus_cap'])
         
+        # === NEW REWARD COMPONENTS FOR IMPROVED TRADING BEHAVIOR ===
+        
+        # ISSUE 1: Trend Following Bonus - Reward holding while PnL grows
+        if (abs(self.position_size) > 0.001 and 
+            hasattr(self, 'last_action_type') and self.last_action_type == "HOLD"):
+            
+            # Check if unrealized PnL is improving
+            if (len(self.unrealized_pnl_history) >= 2 and 
+                self.unrealized_pnl > 0 and
+                'trend_following_bonus' in self.reward_config):
+                
+                recent_pnl_change = self.unrealized_pnl_history[-1] - self.unrealized_pnl_history[-2]
+                if recent_pnl_change > self.reward_config.get('trend_following_threshold', 0.01):
+                    positive_bonus += self.reward_config['trend_following_bonus']
+        
+        # ISSUE 2: Quick Loss Cut Bonus - Reward cutting losses quickly
+        if (hasattr(self, 'last_action_type') and 
+            self.last_action_type in ["CANCEL", "CLOSE", "CLOSE_LONG", "CLOSE_SHORT"] and
+            abs(self.position_size) < 0.001 and  # Position was closed
+            'quick_loss_cut_bonus' in self.reward_config):
+            
+            # Check if this was a loss that was cut quickly
+            if (hasattr(self, 'trade_start_step') and self.trade_start_step and
+                len(self.unrealized_pnl_history) >= 1 and
+                self.unrealized_pnl_history[-1] < self.reward_config.get('loss_cut_threshold', -0.01)):
+                
+                hold_duration = self.current_step - self.trade_start_step
+                max_hold_steps = self.reward_config.get('max_loss_hold_steps', 5)
+                if hold_duration <= max_hold_steps:
+                    positive_bonus += self.reward_config['quick_loss_cut_bonus']
+        
+        # ISSUE 3: Exit Strategy Differentiation
+        if hasattr(self, 'last_action_type'):
+            
+            # Penalty for CANCEL_CLOSE (panic exits)
+            if (self.last_action_type == "CANCEL" and 
+                'cancel_close_penalty' in self.reward_config):
+                positive_bonus -= self.reward_config['cancel_close_penalty']
+            
+            # Bonus for deliberate exits
+            elif (self.last_action_type in ["CLOSE_LONG", "CLOSE_SHORT"] and
+                  'deliberate_exit_bonus' in self.reward_config):
+                positive_bonus += self.reward_config['deliberate_exit_bonus']
+                
+                # Additional bonus for profit target achievement
+                if ('profit_target_achievement_bonus' in self.reward_config and
+                    len(self.unrealized_pnl_history) >= 1 and
+                    self.unrealized_pnl_history[-1] > self.reward_config.get('profit_target_threshold', 0.005)):
+                    positive_bonus += self.reward_config['profit_target_achievement_bonus']
+        
+        # ISSUE 4: Minimum Profitability Bonus
+        if (hasattr(self, 'last_action_type') and 
+            self.last_action_type in ["CLOSE", "CLOSE_LONG", "CLOSE_SHORT"] and
+            abs(self.position_size) < 0.001 and  # Position was closed
+            'minimum_profit_bonus' in self.reward_config):
+            
+            # Check if profit exceeded minimum threshold
+            if (len(self.unrealized_pnl_history) >= 1 and
+                self.unrealized_pnl_history[-1] > self.reward_config.get('minimum_profit_threshold', 0.005)):
+                positive_bonus += self.reward_config['minimum_profit_bonus']
+        
         # === COMBINE ALL COMPONENTS ===
         total_penalty = (
             risk_penalty + 
@@ -2504,6 +2565,55 @@ class FuturesTradingEnv(gym.Env):
         
         # Apply dynamic loss multiplier
         total_penalty *= self.loss_penalty_multiplier
+        
+        # === NEW PENALTY COMPONENTS FOR IMPROVED TRADING BEHAVIOR ===
+        
+        # ISSUE 1: Penalty for exiting profitable trends
+        exit_profitable_trend_penalty = 0.0
+        if (hasattr(self, 'last_action_type') and 
+            self.last_action_type in ["CANCEL", "CLOSE", "CLOSE_LONG", "CLOSE_SHORT"] and
+            abs(self.position_size) < 0.001 and  # Position was closed
+            'exit_profitable_trend_penalty' in self.reward_config):
+            
+            # Check if we exited during a profitable trend
+            if (len(self.unrealized_pnl_history) >= 2 and
+                self.unrealized_pnl_history[-1] > 0):  # Was profitable
+                
+                recent_pnl_change = self.unrealized_pnl_history[-1] - self.unrealized_pnl_history[-2]
+                profitable_trend_threshold = self.reward_config.get('profitable_trend_threshold', 0.02)
+                
+                if recent_pnl_change > profitable_trend_threshold:  # Strong positive trend
+                    exit_profitable_trend_penalty = self.reward_config['exit_profitable_trend_penalty']
+        
+        # ISSUE 4: Small position and fee ratio penalties
+        small_position_penalty = 0.0
+        excessive_fee_penalty = 0.0
+        
+        if hasattr(self, '_last_fees') and self._last_fees > 0:
+            # Penalty for small positions relative to fees
+            if ('small_position_penalty' in self.reward_config and
+                hasattr(self, 'position_size') and abs(self.position_size) > 0):
+                
+                current_price = self._safe_get_price_data(self.current_step, 'close', 50000.0)
+                position_value = abs(self.position_size) * current_price
+                small_threshold = self.reward_config.get('small_position_threshold', 50.0)
+                
+                if position_value < small_threshold:
+                    small_position_penalty = self.reward_config['small_position_penalty']
+            
+            # Penalty for excessive fee ratios
+            if ('excessive_fee_ratio_penalty' in self.reward_config and
+                hasattr(self, 'position_size') and abs(self.position_size) > 0):
+                
+                current_price = self._safe_get_price_data(self.current_step, 'close', 50000.0)
+                trade_value = abs(self.position_size) * current_price
+                
+                if trade_value > 0:
+                    fee_ratio = self._last_fees / trade_value
+                    fee_threshold = self.reward_config.get('fee_ratio_penalty_threshold', 0.1)
+                    
+                    if fee_ratio > fee_threshold:
+                        excessive_fee_penalty = self.reward_config['excessive_fee_ratio_penalty']
         
         # Add safety intervention penalties (teach agent not to attempt extreme actions)
         safety_penalty = getattr(self, 'safety_intervention_penalty', 0.0)
@@ -2527,7 +2637,8 @@ class FuturesTradingEnv(gym.Env):
             safety_penalty + extreme_leverage_penalty + position_state_penalty + zero_pnl_penalty + 
             dust_position_penalty + phantom_trade_penalty + invalid_entry_penalty + 
             zero_pnl_detection_penalty + zero_pnl_close_penalty + excessive_modification_penalty + 
-            fee_cap_penalty + entry_price_fallback_penalty + critical_trade_block_penalty
+            fee_cap_penalty + entry_price_fallback_penalty + critical_trade_block_penalty +
+            exit_profitable_trend_penalty + small_position_penalty + excessive_fee_penalty  # NEW PENALTIES
         )
         total_penalty += all_penalty_categories
         
@@ -3025,6 +3136,34 @@ class FuturesTradingEnv(gym.Env):
             'final_reward_positive_cap': 15.0,
             'final_reward_negative_cap': -25.0,
             'severe_loss_reward_cap': -50.0,
+            
+            # === NEW PARAMETERS FOR IMPROVED TRADING BEHAVIOR ===
+            # (Default to 0.0 for backward compatibility)
+            
+            # ISSUE 1: Trend following bonuses
+            'trend_following_bonus': 0.0,
+            'trend_following_threshold': 0.01,
+            'exit_profitable_trend_penalty': 0.0,
+            'profitable_trend_threshold': 0.02,
+            
+            # ISSUE 2: Quick loss cutting rewards
+            'quick_loss_cut_bonus': 0.0,
+            'loss_cut_threshold': -0.01,
+            'max_loss_hold_steps': 5,
+            
+            # ISSUE 3: Exit strategy differentiation
+            'cancel_close_penalty': 0.0,
+            'deliberate_exit_bonus': 0.0,
+            'profit_target_achievement_bonus': 0.0,
+            'profit_target_threshold': 0.005,
+            
+            # ISSUE 4: Minimum profitability requirements
+            'minimum_profit_threshold': 0.005,
+            'minimum_profit_bonus': 0.0,
+            'small_position_penalty': 0.0,
+            'small_position_threshold': 50.0,
+            'fee_ratio_penalty_threshold': 0.1,
+            'excessive_fee_ratio_penalty': 0.0,
         }
         
         # Start with defaults

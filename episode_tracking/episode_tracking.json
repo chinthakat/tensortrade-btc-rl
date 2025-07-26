@@ -1091,6 +1091,30 @@
       "completed": true,
       "model_path": "episodes/episode_01_20250726_122614/models/final_model_episode_01_20250726_122614.zip",
       "timestamp": "2025-07-26T12:31:28.043783"
+    },
+    {
+      "episode_id": "episode_01_20250726_133330",
+      "episode_number": 1,
+      "total_timesteps": 50000,
+      "model_architecture": "attention_cnn_lstm",
+      "algorithm": "ppo",
+      "train_data_size": 49887,
+      "val_data_size": 2625,
+      "completed": true,
+      "model_path": "episodes/episode_01_20250726_133330/models/final_model_episode_01_20250726_133330.zip",
+      "timestamp": "2025-07-26T13:38:04.626937"
+    },
+    {
+      "episode_id": "episode_01_20250726_134836",
+      "episode_number": 1,
+      "total_timesteps": 50000,
+      "model_architecture": "attention_cnn_lstm",
+      "algorithm": "ppo",
+      "train_data_size": 49887,
+      "val_data_size": 2625,
+      "completed": true,
+      "model_path": "episodes/episode_01_20250726_134836/models/final_model_episode_01_20250726_134836.zip",
+      "timestamp": "2025-07-26T13:53:22.984814"
     }
   ],
   "performance_history": [

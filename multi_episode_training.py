@@ -684,13 +684,26 @@ class MultiEpisodeTrainer:
             
             # Extract useful info from the original path for naming
             if "episode_" in self.best_model_path:
-                episode_info = self.best_model_path.split("episode_")[1].split("/")[0]
+                episode_info = self.best_model_path.split("episode_")[1].split(os.sep)[0]
             else:
                 episode_info = "multi_episode"
             
             # Create descriptive filename
             new_filename = f"best_multi_episode_{episode_info}_{timestamp}.zip"
             destination_path = models_dir / new_filename
+            
+            # Debug: Print paths
+            console.print(f"[cyan]Debug - Source path: {self.best_model_path}[/cyan]")
+            console.print(f"[cyan]Debug - Destination path: {destination_path}[/cyan]")
+            console.print(f"[cyan]Debug - Episode info: {episode_info}[/cyan]")
+            
+            # Ensure source file exists
+            if not os.path.exists(self.best_model_path):
+                console.print(f"[red]❌ Source file does not exist: {self.best_model_path}[/red]")
+                return
+            
+            # Ensure destination directory exists
+            destination_path.parent.mkdir(parents=True, exist_ok=True)
             
             # Copy the best model to general models folder
             shutil.copy2(self.best_model_path, destination_path)
