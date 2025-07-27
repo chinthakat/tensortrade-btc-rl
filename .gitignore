@@ -206,6 +206,7 @@ logs/
 *.log
 trading_logs/
 backtest_logs/
+binance_logs/
 live_trading_logs/
 training_logs/
 evaluation_logs/

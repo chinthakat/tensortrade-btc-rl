@@ -463,11 +463,11 @@ class FuturesTradingEnv(gym.Env):
         
         df = self.df.copy()
         
-        # Basic price features
-        df['returns'] = df['close'].pct_change()
-        df['log_returns'] = np.log(df['close'] / df['close'].shift(1))
-        df['high_low_pct'] = (df['high'] - df['low']) / df['close']
-        df['close_open_pct'] = (df['close'] - df['open']) / df['open']
+        # Basic price features (with null handling)
+        df['returns'] = df['close'].pct_change().fillna(0)
+        df['log_returns'] = np.log(df['close'] / df['close'].shift(1)).fillna(0)
+        df['high_low_pct'] = ((df['high'] - df['low']) / df['close']).fillna(0)
+        df['close_open_pct'] = ((df['close'] - df['open']) / df['open']).fillna(0)
         
         # === ENHANCED MARKET MICROSTRUCTURE FEATURES ===
         # Price momentum features for better trend detection
@@ -478,15 +478,17 @@ class FuturesTradingEnv(gym.Env):
         # Volume-price divergence (reveals accumulation/distribution)
         df['volume_price_corr'] = df['close'].rolling(10).corr(df['volume'])
         df['obv'] = (np.sign(df['close'].diff()) * df['volume']).cumsum()  # On-Balance Volume
-        df['obv_norm'] = df['obv'] / df['obv'].rolling(20).std()  # Normalized OBV
+        df['obv_norm'] = (df['obv'] / df['obv'].rolling(20).std()).fillna(0)  # Normalized OBV
         
-        # Microstructure patterns
-        df['high_low_spread'] = (df['high'] - df['low']) / df['close']  # Intraday volatility
-        df['close_position_in_range'] = (df['close'] - df['low']) / (df['high'] - df['low'])  # Where price closed in range
+        # Microstructure patterns (with null handling)
+        df['high_low_spread'] = ((df['high'] - df['low']) / df['close']).fillna(0)  # Intraday volatility
+        high_low_diff = df['high'] - df['low']
+        df['close_position_in_range'] = np.where(high_low_diff == 0, 0.5, 
+                                                 (df['close'] - df['low']) / high_low_diff)  # Where price closed in range
         
         # Support/Resistance levels (key for holding decisions)
-        df['resistance_distance'] = (df['close'].rolling(20).max() - df['close']) / df['close']
-        df['support_distance'] = (df['close'] - df['close'].rolling(20).min()) / df['close']
+        df['resistance_distance'] = ((df['close'].rolling(20).max() - df['close']) / df['close']).fillna(0)
+        df['support_distance'] = ((df['close'] - df['close'].rolling(20).min()) / df['close']).fillna(0)
         
         # Note: Market regime indicator (trend_strength) will be calculated after ADX is computed
         
@@ -519,7 +521,9 @@ class FuturesTradingEnv(gym.Env):
         df['bb_upper'] = bb['BBU_20_2.0']
         df['bb_lower'] = bb['BBL_20_2.0'] 
         df['bb_middle'] = bb['BBM_20_2.0']
-        df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / df['bb_middle']
+        
+        # Calculate bb_width with proper null handling
+        df['bb_width'] = ((df['bb_upper'] - df['bb_lower']) / df['bb_middle']).fillna(0)
         
         atr_result = ta.atr(df['high'], df['low'], df['close'], length=14)
         if atr_result is None:
@@ -613,10 +617,10 @@ class FuturesTradingEnv(gym.Env):
             raise ValueError("Failed to calculate volume SMA. Check if data is valid.")
         df['volume_sma'] = volume_sma
         
-        df['volume_ratio'] = df['volume'] / df['volume_sma']
+        df['volume_ratio'] = (df['volume'] / df['volume_sma']).fillna(1.0)
         
-        # Price position indicators
-        df['price_position'] = (df['close'] - df['sma_20']) / df['sma_20']
+        # Price position indicators (with null handling)
+        df['price_position'] = ((df['close'] - df['sma_20']) / df['sma_20']).fillna(0)
         
         # Instead of dropping NaN rows, we'll fill them to preserve alignment with original CSV
         # Store original data shape for reference
@@ -627,7 +631,7 @@ class FuturesTradingEnv(gym.Env):
         price_features = ['sma_10', 'sma_20', 'ema_10', 'ema_20', 'bb_upper', 'bb_lower', 'bb_width']
         for col in price_features:
             if col in df.columns:
-                df[col] = df[col].fillna(method='ffill').fillna(method='bfill')
+                df[col] = df[col].ffill().bfill()
         
         # For percentage-based features, fill with 0
         pct_features = ['returns', 'log_returns', 'high_low_pct', 'close_open_pct', 'price_position',
