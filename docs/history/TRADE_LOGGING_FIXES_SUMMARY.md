@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-"""
 TRADE LOGGING FIXES SUMMARY
 ===========================
 
@@ -96,7 +94,3 @@ Run a new training session and analyze the resulting CSV to confirm:
 
 These fixes address the precision issues identified in the 27,038 trade record analysis
 and should result in more accurate and consistent trade logging.
-"""
-
-if __name__ == "__main__":
-    print(__doc__)

@@ -118,7 +118,7 @@ pip install rich tqdm
 After installation, test if everything works:
 
 ```bash
-python test_system.py
+python -m tests.test_system
 ```
 
 ## Common Issues and Solutions:
@@ -157,6 +157,6 @@ pip install pandas-ta --no-deps
 ## Next Steps:
 
 Once installation is complete:
-1. Run `python test_system.py` to verify everything works
+1. Run `python -m tests.test_system` to verify everything works
 2. Run `python main.py` to start the trading bot
 3. Begin with downloading data (option 5) or training a model (option 1)

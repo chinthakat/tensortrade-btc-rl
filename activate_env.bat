@@ -11,9 +11,9 @@ conda list | findstr "pandas\|numpy\|torch\|stable-baselines3\|gymnasium"
 echo.
 echo 🎯 Available commands:
 echo   python train_model.py              - Start training
-echo   python test_system.py              - Run system tests  
+echo   python -m tests.test_system        - Run system tests  
 echo   python backtest.py                 - Run backtesting
-echo   python test_silent_penalties.py    - Test penalty system
-echo   python test_invalid_state_penalties.py - Test invalid state penalties
+echo   python -m tests.test_silent_penalties - Test penalty system
+echo   python -m tests.test_invalid_state_penalties - Test invalid state penalties
 echo.
 cmd /k

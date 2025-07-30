@@ -61,7 +61,7 @@ def main():
         print("\n🚀 SETUP COMPLETE - Ready for training!")
         print("\n🎯 Quick start commands:")
         print("   python train_model.py              # Start training")
-        print("   python test_silent_penalties.py    # Test penalty system")
+        print("   python -m tests.test_silent_penalties  # Test penalty system")
         print("   python backtest.py                 # Run backtesting")
     else:
         print("\n⚠️  Setup incomplete - please fix issues above")

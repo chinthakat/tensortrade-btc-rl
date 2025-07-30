@@ -90,7 +90,7 @@ The system includes fallback_ta.py with pure pandas/numpy implementations if pan
 
 After installation, run the test script:
 ```powershell
-python test_system.py
+python -m tests.test_system
 ```
 
 This will verify all components are working correctly.
@@ -148,7 +148,7 @@ For a minimal working setup, install only core components:
 pip install torch gymnasium stable-baselines3 pandas numpy scikit-learn matplotlib tqdm rich click
 ```
 
-Then run `python test_system.py` to check what additional packages are needed.
+Then run `python -m tests.test_system` to check what additional packages are needed.
 
 ## Contact and Support
 
@@ -161,7 +161,7 @@ If you continue to experience issues:
 
 ## Quick Start After Installation
 
-1. **Test the system**: `python test_system.py`
+1. **Test the system**: `python -m tests.test_system`
 2. **Prepare your data**: Place CSV files in the `data/` directory
 3. **Start training**: `python main.py` and select "Train Model"
 4. **Run backtests**: `python main.py` and select "Backtest Strategy"

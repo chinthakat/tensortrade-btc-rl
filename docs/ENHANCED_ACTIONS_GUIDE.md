@@ -111,11 +111,12 @@ When `use_advanced_action_space: false`:
 3. Monitor logs: Check for HOLD/CANCEL action usage
 
 ### Testing Action Space
-```bash
-python test_enhanced_actions.py
-```
 
-This will verify both advanced and legacy action spaces work correctly.
+The `test_enhanced_actions.py` script referenced here was never written — the
+file was committed empty and has since been removed. To check both action spaces
+by hand, construct `FuturesTradingEnv` with `use_advanced_action_space=True` and
+then `False`, and inspect `env.action_space` and the wrapper produced by
+`wrap_environment_for_algorithm()`.
 
 ## Benefits
 1. **Reduced Overtrading**: Explicit hold action reduces unnecessary trades

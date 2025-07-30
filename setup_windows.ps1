@@ -67,7 +67,7 @@ if ($condaChoice -eq "y" -or $condaChoice -eq "Y") {
 
 Write-Host ""
 Write-Host "Testing installation..." -ForegroundColor Yellow
-python test_system.py
+python -m tests.test_system
 
 Write-Host ""
 Write-Host "====================================" -ForegroundColor Green

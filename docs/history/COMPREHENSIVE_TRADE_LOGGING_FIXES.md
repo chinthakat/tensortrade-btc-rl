@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-"""
 COMPREHENSIVE TRADE LOGGING FIXES - FINAL IMPLEMENTATION
 =========================================================
 
@@ -211,7 +209,3 @@ After Fixes:
 
 This comprehensive solution addresses all identified issues and provides
 a robust foundation for accurate trade analysis and system monitoring.
-"""
-
-if __name__ == "__main__":
-    print(__doc__)

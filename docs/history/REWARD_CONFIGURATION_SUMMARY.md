@@ -1,4 +1,3 @@
-"""
 Summary: Configurable Reward Function Implementation
 ===================================================
 
@@ -117,4 +116,3 @@ special_penalty += self.reward_config['liquidation_penalty']  # Instead of += 25
 
 This implementation provides a professional-grade configurable reward system that 
 maintains backward compatibility while enabling sophisticated strategy customization.
-"""

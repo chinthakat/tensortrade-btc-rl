@@ -101,9 +101,7 @@ if not timeout_confirmation("Continue to next episode?", timeout_seconds=120, de
 
 ## Testing
 
-Run the test script to verify functionality:
-```bash
-python test_auto_continue.py
-```
-
-This will run a quick 2-episode test with 10-second timeouts to verify the auto-continue mechanism works correctly.
+The `test_auto_continue.py` script referenced here was never written — the file
+was committed empty and has since been removed. Verify the behaviour by starting
+a short multi-episode run and leaving the confirmation prompt unanswered; it
+should time out and continue on its own.

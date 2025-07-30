@@ -33,7 +33,7 @@ The project now has `.vscode/settings.json` configured to:
 
 ### **Method 4: Environment Verification**
 ```bash
-python check_setup.py
+python -m scripts.check_setup
 ```
 - ✅ **Verifies environment** is correctly activated
 - ✅ **Checks all packages** are installed
@@ -45,7 +45,7 @@ python check_setup.py
 ### **Daily Usage:**
 1. **Open VS Code** in project folder → Environment auto-activates
 2. **OR double-click** `activate_env.bat` → Manual activation
-3. **Run** `python check_setup.py` → Verify everything works
+3. **Run** `python -m scripts.check_setup` → Verify everything works
 4. **Start training** with `python train_model.py`
 
 ### **Troubleshooting:**
@@ -57,7 +57,7 @@ conda activate rl_trading_15m
 pip install stable-baselines3 gymnasium pandas-ta torch
 
 # If setup issues:
-python check_setup.py
+python -m scripts.check_setup
 ```
 
 ## **🔧 What's Been Configured**
@@ -67,7 +67,7 @@ python check_setup.py
 - ✅ `activate_env.ps1` - PowerShell auto-activation  
 - ✅ `.vscode/settings.json` - VS Code integration
 - ✅ `.env` - Environment variables
-- ✅ `check_setup.py` - Setup verification
+- ✅ `scripts/check_setup.py` - Setup verification
 
 ### **VS Code Integration:**
 - ✅ **Default terminal profile** uses rl_trading_15m

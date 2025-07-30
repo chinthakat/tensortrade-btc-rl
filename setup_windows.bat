@@ -39,7 +39,7 @@ pip install -r requirements.txt
 
 echo.
 echo Testing installation...
-python test_system.py
+python -m tests.test_system
 
 echo.
 echo ====================================
