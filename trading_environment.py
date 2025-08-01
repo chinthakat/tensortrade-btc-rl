@@ -285,9 +285,45 @@ class PriceValidator:
 
 class FuturesTradingEnv(gym.Env):
     """
-    Custom Binance Futures Trading Environment with TensorTrade influence
+    Gymnasium environment simulating a Binance USDT-margined perpetual futures
+    account on a single symbol.
+
+    Observation (Dict):
+        market_features:    (window_size, 8) float32. The eight indicators kept
+                            by _prepare_features() -- returns, rsi, ema_10,
+                            ema_20, macd, adx, atr, volume_ratio -- standard-
+                            scaled with a StandardScaler fitted only on the
+                            training split, so validation data does not leak.
+        portfolio_features: (9,) float32. Equity ratio, normalised position
+                            size, normalised unrealised PnL, drawdown,
+                            normalised leverage, normalised margin used,
+                            consecutive losses, balance trend, unrealised-PnL
+                            trend.
+
+    Action:
+        use_advanced_action_space=False (default)
+            Box(-max_leverage, +max_leverage, shape=(1,)). Sign is direction,
+            magnitude is leverage; anything below self.trading_threshold (0.1)
+            is treated as no trade.
+        use_advanced_action_space=True
+            Dict with action_type Discrete(4) (0=HOLD, 1=BUY, 2=SELL,
+            3=CANCEL), leverage Box and risk_percentage Box. PPO cannot consume
+            a Dict action space, so wrap the env with
+            action_space_wrapper.wrap_environment_for_algorithm() first.
+
+    Reward:
+        _calculate_enhanced_reward(). Scaled equity change plus tiered drawdown,
+        equity-floor, consecutive-loss, trend, volatility and trading-cost
+        penalties, and duration/recovery bonuses. Every constant is overridable
+        through the reward_config argument; defaults in _setup_reward_config().
+
+    Costs modelled: maker/taker fees, maintenance margin and liquidation.
+    Not modelled: funding payments. The funding_rate argument is stored but is
+    never charged against equity, so short and long positions cost the same to
+    hold. Slippage and partial fills are not modelled either -- every order
+    fills at the bar price.
     """
-    
+
     metadata = {'render_modes': ['human']}
     
     def __init__(
