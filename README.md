@@ -127,6 +127,9 @@ flowchart TD
 
 Dependencies are pinned loosely in [`requirements.txt`](requirements.txt).
 `numpy` is pinned exactly (`1.26.4`) because `pandas-ta` breaks on numpy 2.x.
+Be aware that `trading_environment.py` runs `pip install pandas_ta==0.3.14b0`
+for you at import time if `pandas_ta` is missing — install the requirements
+first if you would rather a module did not install packages on your behalf.
 `DATA_GEN/` has its own minimal [`requirements.txt`](DATA_GEN/requirements.txt)
 if you only want the synthetic data generator.
 
@@ -156,8 +159,25 @@ Then check the install:
 python -m scripts.check_setup
 ```
 
-If you want the CoinAPI downloader, copy [`.env.example`](.env.example) to
-`.env` and put your key in it.
+It reports which of the required packages import. It also prints which conda
+environment is active; that line is informational — a virtualenv is fine.
+
+If you want the CoinAPI downloader, set `COINAPI_API_KEY`. Either export it in
+your shell:
+
+```bash
+export COINAPI_API_KEY=your-key       # Linux/macOS
+```
+
+```powershell
+$env:COINAPI_API_KEY = "your-key"     # Windows PowerShell
+```
+
+or copy [`.env.example`](.env.example) to `.env` in the repository root and put
+the key there — `DataDownload/coinapi_downloader.py` calls `load_dotenv()` when
+it is imported, so the file is found whichever directory you run from. `.env` is
+git-ignored. Without the variable set, the downloader raises before it makes a
+request.
 
 Installation problems — certifi corruption, TA-Lib compilation, conda
 environment resets — are covered in
@@ -225,19 +245,36 @@ CSV with these columns, timestamp in Unix **seconds**:
 
 | Variable | Read by | Purpose |
 | --- | --- | --- |
-| `COINAPI_API_KEY` | `DataDownload/coinapi_downloader.py`, `DataDownload/data_manager.py` | CoinAPI key for historical downloads |
+| `COINAPI_API_KEY` | `DataDownload/coinapi_downloader.py` (and `DataDownload/data_manager.py`, which is part of the package that does not import) | CoinAPI key for historical downloads |
 
-That is the only variable the code reads. Binance API key and secret are
-**prompted for interactively** by `live_trading.py` and are never read from the
-environment or from a file. See [`.env.example`](.env.example).
+That is the only variable the code reads. Both modules call `load_dotenv()`, so
+the value can come either from the environment or from a `.env` file in the
+repository root; see [`.env.example`](.env.example). There is no key baked into
+the source — if it is not set, the downloader raises.
+
+Binance API key and secret are **prompted for interactively** by
+`live_trading.py` and are never read from the environment or from a file.
 
 ### Training configs — `configs/*.json`
 
 `train_model.py` lists every `*.json` in `configs/` at startup and offers to load
-one instead of prompting for each setting. Committed presets:
-`ppo_quick_start.json`, `ppo_production.json`, `a2c_conservative.json`,
-`sac_experimental.json`, `hft_aggressive.json`,
-`config_hold_cancel_actions.json`, plus a few saved training sessions.
+one instead of prompting for each setting. What is committed there:
+
+- Five hand-written presets — `ppo_quick_start.json`, `ppo_production.json`,
+  `a2c_conservative.json`, `sac_experimental.json`, `hft_aggressive.json` — each
+  with a `name`, `description` and `use_case`. These are the ones
+  [`configs/README.md`](configs/README.md) describes.
+- `config_hold_cancel_actions.json`, which uses a different and much larger
+  schema of its own (`environment_config`, `reward_config`, `risk_management`,
+  …) for the advanced HOLD/CANCEL action space. See
+  [`docs/ENHANCED_ACTIONS_GUIDE.md`](docs/ENHANCED_ACTIONS_GUIDE.md).
+- `quick_train.json`, `test.json`, `test2.json` — configs saved from interactive
+  runs in July 2025. Same schema as the presets but with a placeholder
+  description ("Custom training configuration") and no `use_case`.
+- Four `training_session_*.json` files, written automatically by
+  `train_model.py` when a run starts (they carry `"auto_generated": true`).
+
+The table below describes the preset schema.
 
 | Key | Meaning |
 | --- | --- |
@@ -329,7 +366,7 @@ git-ignored apart from their READMEs.
 | [`docs/DIRECTIONAL_INDICATORS_GUIDE.md`](docs/DIRECTIONAL_INDICATORS_GUIDE.md) | The directional indicators computed in `_prepare_features()` |
 | [`docs/AUTO_CONTINUE_GUIDE.md`](docs/AUTO_CONTINUE_GUIDE.md) | Unattended multi-episode training |
 | [`docs/history/`](docs/history/) | Chronological development log — 26 fix and analysis notes |
-| [`docs/original-brief.txt`](docs/original-brief.txt) | The original project brief and background research the design started from |
+| [`docs/original-brief.md`](docs/original-brief.md) | The developer's own pre-code requirements notes, verbatim |
 | [`configs/README.md`](configs/README.md) | What each training preset is for |
 | [`DATA_GEN/README.md`](DATA_GEN/README.md) | Synthetic OHLCV generator |
 | [`DATA_ANALYSIS/README.md`](DATA_ANALYSIS/README.md) | Trade-log analysis tooling |

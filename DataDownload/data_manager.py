@@ -16,6 +16,10 @@ from dotenv import load_dotenv
 from ..data.download_coinapi import CoinAPIDataDownloader
 from ..data.setup_data import DataProcessor
 
+# Loads COINAPI_API_KEY from a .env file in the project root, if one exists.
+load_dotenv()
+
+
 class DataManager:
     """
     Manages data downloading, processing, and validation

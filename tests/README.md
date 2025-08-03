@@ -21,9 +21,12 @@ python -m tests.test_system
 `test_system.py` is the closest thing to a smoke test: it checks that the
 required packages import, that the environment can be constructed, and that a
 few data utilities behave. It is what `setup_windows.ps1` and
-`setup_windows.bat` try to run after installing dependencies (they still invoke
-it as `python test_system.py`, from when this file lived in the repository
-root).
+`setup_windows.bat` run after installing dependencies.
+
+It prints a pass/fail line per check rather than raising, so read the summary at
+the end. Its data-loading and environment checks need `pandas_ta` (which in turn
+needs numpy 1.26.x) and `seaborn`; if those are missing you get failures that say
+nothing about your data.
 
 Many of the other scripts are stale. They reference CSV files under `data/` or
 `episodes/` that are not committed, or constructor arguments that have since

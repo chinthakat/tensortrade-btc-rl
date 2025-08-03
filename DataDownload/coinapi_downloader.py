@@ -14,6 +14,16 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, Dict, List, Tuple, Any
 
+try:
+    # Loads COINAPI_API_KEY from a .env file in the project root, if one exists.
+    # python-dotenv is listed in requirements.txt; if it is missing the key can
+    # still be supplied by exporting it in the shell.
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except ImportError:  # pragma: no cover - optional dependency
+    pass
+
 class CoinAPIDownloader:
     """
     Clean implementation of CoinAPI data downloader supporting multiple data types
@@ -25,7 +35,7 @@ class CoinAPIDownloader:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         
         # API Configuration
-        self.api_key = os.getenv("COINAPI_API_KEY", "***REMOVED***")
+        self.api_key = os.getenv("COINAPI_API_KEY", "")
         self.base_url = "https://rest.coinapi.io/v1"
         self.headers = {
             "X-CoinAPI-Key": self.api_key,
@@ -73,7 +83,10 @@ class CoinAPIDownloader:
     def _make_request(self, endpoint: str, params: Dict = None) -> Dict:
         """Make API request with error handling"""
         if not self.api_key:
-            raise ValueError("CoinAPI key required")
+            raise ValueError(
+                "CoinAPI key required. Set COINAPI_API_KEY in your environment "
+                "or in a .env file in the project root (see .env.example)."
+            )
         
         self._rate_limit()
         url = f"{self.base_url}/{endpoint}"
